@@ -1,0 +1,5 @@
+{
+  "name": "StarCycle NeuraQueen Chatbot",
+  "description": "A RAG-powered Ecommerce Chatbot for StarCycle using Gemini API and client-side vector simulation.",
+  "requestFramePermissions": []
+}
