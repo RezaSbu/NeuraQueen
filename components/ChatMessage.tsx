@@ -4,7 +4,7 @@ import { ChatMessage as ChatMessageType, ProductMatch } from '../types';
 import ProductCard from './ProductCard';
 import Typewriter from './Typewriter';
 import ReactMarkdown from 'react-markdown';
-import { Bot, User, Cpu } from 'lucide-react';
+import { User, Cpu, BrainCircuit } from 'lucide-react';
 
 interface Props {
   message: ChatMessageType;
@@ -17,14 +17,17 @@ const ChatMessage: React.FC<Props> = ({ message, isLastMessage, onCompare, compa
   const isUser = message.role === 'user';
   const hasProducts = message.products && message.products.length > 0;
   
-  // Local state to track if THIS specific message has finished typing.
-  // We initialize true for user messages so they show instantly.
-  // We initialize true if it's NOT the last message (loaded from history).
-  const [isTyped, setIsTyped] = useState(!isLastMessage || isUser);
+  // Logic to determine if we should animate:
+  // 1. It must be the last message.
+  // 2. It must be recent (created in the last 10 seconds). 
+  // This prevents re-typing when loading history or switching sessions.
+  const isRecent = message.timestamp ? (Date.now() - message.timestamp < 10000) : true;
+  const shouldAnimate = !isUser && isLastMessage && isRecent;
+
+  const [isTyped, setIsTyped] = useState(!shouldAnimate);
 
   useEffect(() => {
-     // If this message becomes "not last" (new message added), ensure it's marked as typed
-     // This prevents re-typing if the parent re-renders while it was still typing
+     // If it stops being the last message, force it to 'typed' state immediately.
      if (!isLastMessage) {
          setIsTyped(true);
      }
@@ -41,7 +44,7 @@ const ChatMessage: React.FC<Props> = ({ message, isLastMessage, onCompare, compa
             ? 'bg-gradient-to-br from-gray-700 to-gray-800 text-gray-300' 
             : 'bg-gradient-to-br from-[#00D084] to-[#00A060] text-black shadow-primary/20'}
         `}>
-          {isUser ? <User size={20} /> : <Bot size={22} />}
+          {isUser ? <User size={20} /> : <BrainCircuit size={22} />}
         </div>
 
         {/* Content Container */}
@@ -49,7 +52,7 @@ const ChatMessage: React.FC<Props> = ({ message, isLastMessage, onCompare, compa
            
            {/* Header Name (Bot only) */}
            {!isUser && (
-             <span className="text-xs font-bold text-gray-500 mb-[-5px] mr-1">NeuraQueen AI</span>
+             <span className="text-xs font-bold text-gray-500 mb-[-5px] mr-1">Mobinext AI</span>
            )}
 
            {/* Text Bubble */}
@@ -95,7 +98,7 @@ const ChatMessage: React.FC<Props> = ({ message, isLastMessage, onCompare, compa
              </div>
            )}
 
-            {/* Product Grid */}
+            {/* Product Grid - Show if typed OR if it's an old message */}
             {hasProducts && (isTyped || !isLastMessage) && (
              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 mt-2 animate-slideUp">
                {message.products?.map((product, idx) => (

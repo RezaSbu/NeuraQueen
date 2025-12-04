@@ -1,3 +1,4 @@
+
 import { Product, ProductMatch, FilterParams, DATA_URL } from '../types';
 
 let productDatabase: Product[] = [];
@@ -79,11 +80,14 @@ export const searchProducts = async (params: FilterParams): Promise<ProductMatch
   });
 
   // Keyword scoring
+  // STRICT UPDATE: Excluded 'description' from search scope. 
+  // Only searching Title and Features (which contains size, volume, etc.)
   if (keywords) {
     const keywordList = keywords.split(' ').filter(k => k.length > 2);
     candidates = candidates.map((p: any) => {
       let score = 0;
-      const textSpace = `${p.title} ${p.description || ''} ${p.features?.join(' ')}`.toLowerCase();
+      // ONLY Title and Features are considered. Description is IGNORED.
+      const textSpace = `${p.title} ${p.features?.join(' ')}`.toLowerCase();
       
       keywordList.forEach(k => {
         if (textSpace.includes(k.toLowerCase())) score += 1;

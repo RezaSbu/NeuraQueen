@@ -44,7 +44,8 @@ const App: React.FC = () => {
       messages: [{
         id: 'welcome',
         role: 'model',
-        text: 'سلام! من **NeuraQueen** هستم 🤖\n\nدستیار هوشمند استار سیکلت. چطور می‌تونم در خرید لوازم موتور کمکتون کنم؟'
+        text: 'سلام! من **Mobinext** هستم 🤖\n\nدستیار هوشمند استار سیکلت. چطور می‌تونم در خرید لوازم موتور کمکتون کنم؟',
+        timestamp: Date.now()
       }],
       lastModified: Date.now()
     };
@@ -95,7 +96,8 @@ const App: React.FC = () => {
     const userMsg: ChatMessageType = {
       id: Date.now().toString(),
       role: 'user',
-      text: userText
+      text: userText,
+      timestamp: Date.now()
     };
     
     // Optimistic Update
@@ -111,7 +113,8 @@ const App: React.FC = () => {
         id: (Date.now() + 1).toString(),
         role: 'model',
         text: response.text,
-        products: response.products
+        products: response.products,
+        timestamp: Date.now()
       };
       
       updateCurrentSession([...updatedWithUser, botMsg]);
@@ -119,7 +122,8 @@ const App: React.FC = () => {
       const errorMsg: ChatMessageType = {
         id: (Date.now() + 1).toString(),
         role: 'model',
-        text: "متاسفانه خطایی رخ داد. لطفا دوباره تلاش کنید."
+        text: "متاسفانه خطایی رخ داد. لطفا دوباره تلاش کنید.",
+        timestamp: Date.now()
       };
       updateCurrentSession([...updatedWithUser, errorMsg]);
     } finally {
@@ -213,8 +217,8 @@ const App: React.FC = () => {
            ))}
         </div>
         
-        <div className="p-4 border-t border-white/5 text-[10px] text-gray-600 text-center">
-            Powered by Gemini 2.5 & React
+        <div className="p-4 border-t border-white/5 text-[10px] text-gray-600 text-center font-bold">
+            Mobinext
         </div>
       </aside>
 
@@ -228,7 +232,7 @@ const App: React.FC = () => {
                   <Menu size={24} />
               </button>
               <div className="flex flex-col">
-                  <span className="font-bold text-white text-sm">NeuraQueen AI</span>
+                  <span className="font-bold text-white text-sm">Mobinext AI</span>
                   <div className="flex items-center gap-1.5">
                       <span className="w-1.5 h-1.5 bg-green-500 rounded-full animate-pulse-fast"></span>
                       <span className="text-[10px] text-gray-400">آنلاین و آماده پاسخگویی</span>
@@ -262,7 +266,7 @@ const App: React.FC = () => {
           
           {isLoading && (
              <ChatMessage 
-               message={{ id: 'thinking', role: 'model', text: '', isThinking: true }} 
+               message={{ id: 'thinking', role: 'model', text: '', isThinking: true, timestamp: Date.now() }} 
                isLastMessage={true}
                onCompare={toggleComparison}
                compareList={comparisonList}
@@ -276,7 +280,11 @@ const App: React.FC = () => {
         <div className="p-4 bg-gradient-to-t from-black via-black to-transparent">
           <div className="max-w-3xl mx-auto relative flex items-end gap-2 bg-[#1E1E1E] border border-white/10 rounded-3xl p-2 focus-within:border-primary/50 focus-within:shadow-[0_0_20px_rgba(0,208,132,0.1)] transition-all duration-300">
             
-            <button className="p-3 text-gray-500 hover:text-primary transition-colors hidden md:block" title="پاکسازی ورودی">
+            <button 
+              onClick={() => setInput('')}
+              className="p-3 text-gray-500 hover:text-primary transition-colors hidden md:block" 
+              title="پاکسازی ورودی"
+            >
               <Sparkles size={20} />
             </button>
 
@@ -303,8 +311,8 @@ const App: React.FC = () => {
               <Send size={20} className={isLoading ? 'opacity-0' : 'ml-0.5'} />
             </button>
           </div>
-          <p className="text-center text-[10px] text-gray-600 mt-3 font-medium">
-              NeuraQueen ممکن است در مورد قیمت دقیق اشتباه کند. لطفاً قبل از خرید مشخصات نهایی را چک کنید.
+          <p className="text-center text-[10px] text-gray-600 mt-3 font-medium flex items-center justify-center gap-1">
+              Created by Reza <span className="text-red-500">❤️</span>
           </p>
         </div>
       </div>
