@@ -1,4 +1,3 @@
-
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Send, Bike, Sparkles, MessageSquare, Plus, Scale, Trash2, Menu, X } from 'lucide-react';
 import { initializeChat, sendMessageToGemini } from './services/geminiService';
@@ -217,8 +216,10 @@ const App: React.FC = () => {
            ))}
         </div>
         
-        <div className="p-4 border-t border-white/5 text-[10px] text-gray-600 text-center font-bold">
-            Mobinext
+        <div className="p-6 border-t border-white/5 text-center">
+            <h1 className="text-2xl font-black bg-gradient-to-r from-primary via-white to-primary bg-clip-text text-transparent animate-pulse-slow tracking-wider drop-shadow-lg">
+                Mobinext
+            </h1>
         </div>
       </aside>
 
@@ -311,7 +312,7 @@ const App: React.FC = () => {
               <Send size={20} className={isLoading ? 'opacity-0' : 'ml-0.5'} />
             </button>
           </div>
-          <p className="text-center text-[10px] text-gray-600 mt-3 font-medium flex items-center justify-center gap-1">
+          <p dir="ltr" className="text-center text-[10px] text-gray-600 mt-3 font-medium flex items-center justify-center gap-1">
               Created by Reza <span className="text-red-500">❤️</span>
           </p>
         </div>

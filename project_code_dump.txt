@@ -1,0 +1,2345 @@
+.\.gitignore:
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+-------------------------
+.\App.tsx:
+
+import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { Send, Bike, Sparkles, MessageSquare, Plus, Scale, Trash2, Menu, X } from 'lucide-react';
+import { initializeChat, sendMessageToGemini } from './services/geminiService';
+import { loadProductDatabase } from './services/productService';
+import ChatMessage from './components/ChatMessage';
+import ComparisonModal from './components/ComparisonModal';
+import { ChatMessage as ChatMessageType, Session, ProductMatch } from './types';
+
+const App: React.FC = () => {
+  // State
+  const [sessions, setSessions] = useState<Session[]>([]);
+  const [currentSessionId, setCurrentSessionId] = useState<string>('');
+  const [input, setInput] = useState('');
+  const [isLoading, setIsLoading] = useState(false);
+  const [comparisonList, setComparisonList] = useState<ProductMatch[]>([]);
+  const [showComparison, setShowComparison] = useState(false);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+
+  // Initialize
+  useEffect(() => {
+    loadProductDatabase();
+    initializeChat(); 
+    
+    // Create initial session
+    createNewSession();
+  }, []);
+
+  const scrollToBottom = () => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  };
+
+  useEffect(() => {
+    scrollToBottom();
+  }, [sessions, currentSessionId, isLoading]);
+
+  // Session Management
+  const createNewSession = () => {
+    const newSession: Session = {
+      id: Date.now().toString(),
+      title: 'چت جدید',
+      messages: [{
+        id: 'welcome',
+        role: 'model',
+        text: 'سلام! من **Mobinext** هستم 🤖\n\nدستیار هوشمند استار سیکلت. چطور می‌تونم در خرید لوازم موتور کمکتون کنم؟',
+        timestamp: Date.now()
+      }],
+      lastModified: Date.now()
+    };
+    setSessions(prev => [newSession, ...prev]);
+    setCurrentSessionId(newSession.id);
+    setSidebarOpen(false);
+  };
+
+  const updateCurrentSession = (newMessages: ChatMessageType[]) => {
+    setSessions(prev => prev.map(s => {
+      if (s.id === currentSessionId) {
+        // Update title based on first user message if it's "New Chat"
+        let title = s.title;
+        if (s.title === 'چت جدید' && newMessages.length > 1) {
+            const firstUserMsg = newMessages.find(m => m.role === 'user');
+            if (firstUserMsg) title = firstUserMsg.text.slice(0, 30) + '...';
+        }
+        return { ...s, messages: newMessages, title, lastModified: Date.now() };
+      }
+      return s;
+    }));
+  };
+
+  const deleteSession = (e: React.MouseEvent, id: string) => {
+    e.stopPropagation();
+    const newSessions = sessions.filter(s => s.id !== id);
+    setSessions(newSessions);
+    if (currentSessionId === id && newSessions.length > 0) {
+        setCurrentSessionId(newSessions[0].id);
+    } else if (newSessions.length === 0) {
+        createNewSession();
+    }
+  };
+
+  const getCurrentMessages = () => {
+    return sessions.find(s => s.id === currentSessionId)?.messages || [];
+  };
+
+  // Chat Logic
+  const handleSend = async () => {
+    if (!input.trim() || isLoading) return;
+
+    const userText = input;
+    setInput('');
+    setIsLoading(true);
+
+    const currentMsgs = getCurrentMessages();
+    const userMsg: ChatMessageType = {
+      id: Date.now().toString(),
+      role: 'user',
+      text: userText,
+      timestamp: Date.now()
+    };
+    
+    // Optimistic Update
+    const updatedWithUser = [...currentMsgs, userMsg];
+    updateCurrentSession(updatedWithUser);
+
+    try {
+      // Send the previous history (currentMsgs) and the new prompt (userText)
+      // This ensures each session maintains its own isolated memory
+      const response = await sendMessageToGemini(userText, currentMsgs);
+      
+      const botMsg: ChatMessageType = {
+        id: (Date.now() + 1).toString(),
+        role: 'model',
+        text: response.text,
+        products: response.products,
+        timestamp: Date.now()
+      };
+      
+      updateCurrentSession([...updatedWithUser, botMsg]);
+    } catch (error) {
+      const errorMsg: ChatMessageType = {
+        id: (Date.now() + 1).toString(),
+        role: 'model',
+        text: "متاسفانه خطایی رخ داد. لطفا دوباره تلاش کنید.",
+        timestamp: Date.now()
+      };
+      updateCurrentSession([...updatedWithUser, errorMsg]);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  // Comparison Logic - Memoized to prevent re-renders
+  const toggleComparison = useCallback((product: ProductMatch) => {
+    setComparisonList(prev => {
+        const exists = prev.find(p => p.title === product.title);
+        if (exists) {
+            return prev.filter(p => p.title !== product.title);
+        } else {
+            if (prev.length >= 3) {
+                alert("حداکثر ۳ محصول برای مقایسه می‌توانید انتخاب کنید.");
+                return prev;
+            }
+            return [...prev, product];
+        }
+    });
+  }, []);
+
+  const handleKeyPress = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      handleSend();
+    }
+  };
+
+  return (
+    <div className="flex h-screen bg-black text-gray-100 font-sans overflow-hidden" dir="rtl">
+      
+      {/* Mobile Overlay */}
+      {sidebarOpen && (
+        <div 
+          className="fixed inset-0 bg-black/50 backdrop-blur-sm z-30 md:hidden"
+          onClick={() => setSidebarOpen(false)}
+        />
+      )}
+
+      {/* Sidebar */}
+      <aside className={`
+        fixed md:relative inset-y-0 right-0 z-40 w-72 bg-[#121212] border-l border-white/5 flex flex-col transition-transform duration-300
+        ${sidebarOpen ? 'translate-x-0' : 'translate-x-full md:translate-x-0'}
+      `}>
+        <div className="p-4 border-b border-white/5 flex items-center justify-between">
+           <div className="flex items-center gap-2">
+             <div className="bg-gradient-to-br from-primary to-green-600 p-1.5 rounded-lg">
+                <Bike size={20} className="text-black" />
+             </div>
+             <h1 className="font-bold text-lg">StarCycle</h1>
+           </div>
+           <button onClick={() => setSidebarOpen(false)} className="md:hidden text-gray-400">
+             <X size={24} />
+           </button>
+        </div>
+
+        <div className="p-4">
+           <button 
+             onClick={createNewSession}
+             className="w-full flex items-center gap-2 bg-primary hover:bg-green-400 text-black font-bold py-3 px-4 rounded-xl transition-all shadow-lg shadow-primary/10 hover:shadow-primary/30"
+           >
+             <Plus size={20} />
+             <span>چت جدید</span>
+           </button>
+        </div>
+
+        <div className="flex-1 overflow-y-auto px-2 space-y-1 scrollbar-thin">
+           <h3 className="text-xs font-bold text-gray-500 px-4 py-2">تاریخچه گفتگوها</h3>
+           {sessions.map(session => (
+             <div 
+               key={session.id}
+               onClick={() => { setCurrentSessionId(session.id); setSidebarOpen(false); }}
+               className={`
+                 group flex items-center justify-between p-3 rounded-xl cursor-pointer transition-all
+                 ${session.id === currentSessionId ? 'bg-white/10 text-white' : 'text-gray-400 hover:bg-white/5 hover:text-gray-200'}
+               `}
+             >
+                <div className="flex items-center gap-3 overflow-hidden">
+                    <MessageSquare size={16} className={session.id === currentSessionId ? 'text-primary' : 'text-gray-600'} />
+                    <span className="truncate text-sm">{session.title}</span>
+                </div>
+                <button 
+                  onClick={(e) => deleteSession(e, session.id)}
+                  className="opacity-0 group-hover:opacity-100 hover:text-red-400 transition-opacity p-1"
+                >
+                    <Trash2 size={14} />
+                </button>
+             </div>
+           ))}
+        </div>
+        
+        <div className="p-4 border-t border-white/5 text-[10px] text-gray-600 text-center font-bold">
+            Mobinext
+        </div>
+      </aside>
+
+      {/* Main Content */}
+      <div className="flex-1 flex flex-col relative min-w-0">
+        
+        {/* Header */}
+        <header className="flex items-center justify-between px-4 py-3 bg-[#121212]/80 backdrop-blur-md border-b border-white/5 z-20 absolute top-0 left-0 right-0">
+          <div className="flex items-center gap-3">
+              <button onClick={() => setSidebarOpen(true)} className="md:hidden text-gray-400">
+                  <Menu size={24} />
+              </button>
+              <div className="flex flex-col">
+                  <span className="font-bold text-white text-sm">Mobinext AI</span>
+                  <div className="flex items-center gap-1.5">
+                      <span className="w-1.5 h-1.5 bg-green-500 rounded-full animate-pulse-fast"></span>
+                      <span className="text-[10px] text-gray-400">آنلاین و آماده پاسخگویی</span>
+                  </div>
+              </div>
+          </div>
+          
+          {/* Comparison Button */}
+          {comparisonList.length > 0 && (
+             <button 
+               onClick={() => setShowComparison(true)}
+               className="flex items-center gap-2 bg-yellow-500/10 border border-yellow-500/30 text-yellow-500 px-3 py-1.5 rounded-full text-xs font-bold hover:bg-yellow-500 hover:text-black transition-all animate-fadeIn"
+             >
+                <Scale size={14} />
+                <span>مقایسه ({comparisonList.length})</span>
+             </button>
+          )}
+        </header>
+
+        {/* Chat Area */}
+        <main className="flex-1 overflow-y-auto pt-16 pb-4 px-4 md:px-12 space-y-6 scrollbar-thin">
+          {getCurrentMessages().map((msg, idx) => (
+            <ChatMessage 
+                key={msg.id} 
+                message={msg} 
+                isLastMessage={idx === getCurrentMessages().length - 1}
+                onCompare={toggleComparison}
+                compareList={comparisonList}
+            />
+          ))}
+          
+          {isLoading && (
+             <ChatMessage 
+               message={{ id: 'thinking', role: 'model', text: '', isThinking: true, timestamp: Date.now() }} 
+               isLastMessage={true}
+               onCompare={toggleComparison}
+               compareList={comparisonList}
+             />
+          )}
+          
+          <div ref={messagesEndRef} />
+        </main>
+
+        {/* Input Area */}
+        <div className="p-4 bg-gradient-to-t from-black via-black to-transparent">
+          <div className="max-w-3xl mx-auto relative flex items-end gap-2 bg-[#1E1E1E] border border-white/10 rounded-3xl p-2 focus-within:border-primary/50 focus-within:shadow-[0_0_20px_rgba(0,208,132,0.1)] transition-all duration-300">
+            
+            <button 
+              onClick={() => setInput('')}
+              className="p-3 text-gray-500 hover:text-primary transition-colors hidden md:block" 
+              title="پاکسازی ورودی"
+            >
+              <Sparkles size={20} />
+            </button>
+
+            <textarea
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={handleKeyPress}
+              placeholder="از من بپرس... (مثلاً: کلاه کاسکت فک متحرک تا ۳ تومن)"
+              className="flex-1 bg-transparent text-white placeholder-gray-500 p-3 resize-none focus:outline-none max-h-32 text-sm md:text-base scrollbar-hide leading-relaxed"
+              rows={1}
+              style={{ minHeight: '48px' }}
+            />
+            
+            <button 
+              onClick={handleSend}
+              disabled={!input.trim() || isLoading}
+              className={`
+                w-12 h-12 rounded-full flex items-center justify-center transition-all duration-300
+                ${!input.trim() || isLoading 
+                  ? 'bg-white/5 text-gray-600 cursor-not-allowed' 
+                  : 'bg-primary text-black hover:bg-green-400 hover:scale-110 shadow-lg shadow-primary/20'}
+              `}
+            >
+              <Send size={20} className={isLoading ? 'opacity-0' : 'ml-0.5'} />
+            </button>
+          </div>
+          <p className="text-center text-[10px] text-gray-600 mt-3 font-medium flex items-center justify-center gap-1">
+              Created by Reza <span className="text-red-500">❤️</span>
+          </p>
+        </div>
+      </div>
+
+      {/* Modal */}
+      {showComparison && (
+          <ComparisonModal 
+             products={comparisonList} 
+             onClose={() => setShowComparison(false)} 
+          />
+      )}
+    </div>
+  );
+};
+
+export default App;
+
+-------------------------
+.\code.py:
+import os
+
+# --- تنظیمات ---
+
+# نام فایلی که نتیجه در آن ذخیره می‌شود
+output_filename = "project_code_dump.txt"
+
+# لیست پسوندهای فایل‌هایی که باید نادیده گرفته شوند (فایل‌های باینری، تصاویر، و...)
+# می‌توانید این لیست را بر اساس نیاز خود تغییر دهید
+extensions_to_skip = [
+    '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.ico', '.svg',
+    '.pdf', '.zip', '.rar', '.tar', '.gz',
+    '.exe', '.dll', '.so', '.dylib',
+    '.mp3', '.wav', '.mp4', '.avi', '.mov',
+    '.ttf', '.woff', '.woff2', '.eot',
+    '.pyc', '.pyo', '.pyd'
+]
+
+# --- شروع عملیات ---
+
+print(f"در حال استخراج کدها... نتیجه در فایل '{output_filename}' ذخیره خواهد شد.")
+
+# باز کردن فایل خروجی برای نوشتن (با انکدینگ utf-8 برای پشتیبانی از فارسی)
+with open(output_filename, 'w', encoding='utf-8') as outfile:
+    # پیمایش تمام پوشه‌ها و زیرپوشه‌ها از محل فعلی ('.')
+    for dirpath, dirnames, filenames in os.walk('.'):
+        for filename in filenames:
+            # نادیده گرفتن فایل خروجی خودش برای جلوگیری از loop بی‌نهایت
+            if filename == output_filename:
+                continue
+
+            # ساخت مسیر کامل فایل
+            full_path = os.path.join(dirpath, filename)
+
+            # نادیده گرفتن فایل‌های باینری و غیرمفید بر اساس پسوند
+            if any(filename.lower().endswith(ext) for ext in extensions_to_skip):
+                print(f"نادیده گرفته شد (فایل باینری): {full_path}")
+                continue
+
+            # تلاش برای خواندن محتوای فایل
+            try:
+                # خواندن فایل با انکدینگ utf-8
+                with open(full_path, 'r', encoding='utf-8') as infile:
+                    content = infile.read()
+
+                    # نوشتن نام فایل و محتوای آن در فایل خروجی با فرمت خواسته شده
+                    outfile.write(f"{full_path}:\n")
+                    outfile.write(content)
+                    outfile.write("\n" + "-"*25 + "\n")
+
+            except UnicodeDecodeError:
+                # اگر فایل با utf-8 باز نشد، یک خطا چاپ می‌کنیم و از آن رد می‌شویم
+                print(f"خطا در خواندن (انکدینگ نامشخص): {full_path}")
+                continue
+            except Exception as e:
+                # مدیریت سایر خطاها (مثلاً دسترسی نداشتن به فایل)
+                print(f"خطا در پردازش فایل {full_path}: {e}")
+                continue
+
+print(f"\nعملیات با موفقیت تمام شد! تمام کدها در فایل '{output_filename}' ذخیره شدند.")
+-------------------------
+.\index.html:
+
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>StarCycle - Mobinext AI</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Vazirmatn:wght@200;300;400;500;600;700;800&display=swap" rel="stylesheet">
+    <script>
+      tailwind.config = {
+        darkMode: 'class',
+        theme: {
+          extend: {
+            fontFamily: {
+              sans: ['Vazirmatn', 'sans-serif'],
+            },
+            colors: {
+              primary: '#10b981', // Emerald 500 - Neon Green
+              'primary-hover': '#34d399',
+              'primary-dim': 'rgba(16, 185, 129, 0.1)',
+              background: '#09090b', // Zinc 950
+              surface: '#18181b', // Zinc 900
+              'surface-lighter': '#27272a', // Zinc 800
+              accent: '#f43f5e', // Rose 500
+            },
+            animation: {
+              'fadeIn': 'fadeIn 0.4s cubic-bezier(0.16, 1, 0.3, 1) forwards',
+              'slideUp': 'slideUp 0.5s cubic-bezier(0.16, 1, 0.3, 1) forwards',
+              'popIn': 'popIn 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275) forwards',
+              'pulse-slow': 'pulse 3s cubic-bezier(0.4, 0, 0.6, 1) infinite',
+            },
+            keyframes: {
+              fadeIn: {
+                '0%': { opacity: '0' },
+                '100%': { opacity: '1' },
+              },
+              slideUp: {
+                '0%': { opacity: '0', transform: 'translateY(20px)' },
+                '100%': { opacity: '1', transform: 'translateY(0)' },
+              },
+              popIn: {
+                '0%': { opacity: '0', transform: 'scale(0.9)' },
+                '100%': { opacity: '1', transform: 'scale(1)' },
+-------------------------
+.\index.tsx:
+import React from 'react';
+import ReactDOM from 'react-dom/client';
+import App from './App';
+
+const rootElement = document.getElementById('root');
+if (!rootElement) {
+  throw new Error("Could not find root element to mount to");
+}
+
+const root = ReactDOM.createRoot(rootElement);
+root.render(
+  <React.StrictMode>
+    <App />
+  </React.StrictMode>
+);
+
+-------------------------
+.\metadata.json:
+{
+  "name": "StarCycle Mobinext Chatbot",
+  "description": "A RAG-powered Ecommerce Chatbot for StarCycle using Gemini API and client-side vector simulation.",
+  "requestFramePermissions": []
+}
+-------------------------
+.\package.json:
+{
+  "name": "starcycle-mobinext-chatbot",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+
+  },
+  "devDependencies": {
+    "@types/node": "^22.14.0",
+    
+    "typescript": "~5.8.2",
+    "vite": "^6.2.0"
+  }
+}
+
+-------------------------
+.\README.md:
+<div align="center">
+<img width="1200" height="475" alt="GHBanner" src="https://github.com/user-attachments/assets/0aa67016-6eaf-458a-adb2-6e31a0763ed6" />
+</div>
+
+# Run and deploy your AI Studio app
+
+This contains everything you need to run your app locally.
+
+View your app in AI Studio: https://ai.studio/apps/drive/1vkBY3_cUzfnwMBKplVnMgQ9P56Fk6-AK
+
+## Run Locally
+
+**Prerequisites:**  Node.js
+
+
+1. Install dependencies:
+   `npm install`
+2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
+3. Run the app:
+   `npm run dev`
+
+-------------------------
+.\tsconfig.json:
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "experimentalDecorators": true,
+    "useDefineForClassFields": false,
+    "module": "ESNext",
+    "lib": [
+      "ES2022",
+      "DOM",
+      "DOM.Iterable"
+    ],
+    "skipLibCheck": true,
+    "types": [
+      "node"
+    ],
+    "moduleResolution": "bundler",
+    "isolatedModules": true,
+    "moduleDetection": "force",
+    "allowJs": true,
+    "jsx": "react-jsx",
+    "paths": {
+      "@/*": [
+        "./*"
+      ]
+    },
+    "allowImportingTsExtensions": true,
+    "noEmit": true
+  }
+}
+-------------------------
+.\types.ts:
+
+export interface Product {
+  id?: string | number;
+  title: string;
+  price: number | string;
+  link: string;
+  image?: string;
+  category?: string;
+  features?: string[]; // Simplified from JSON structure
+  description?: string;
+}
+
+export interface ProductMatch extends Product {
+  isCloseMatch?: boolean;
+  matchReason?: string;
+}
+
+export interface ChatMessage {
+  id: string;
+  role: 'user' | 'model' | 'system';
+  text: string;
+  products?: ProductMatch[];
+  isThinking?: boolean;
+  timestamp?: number;
+}
+
+export interface Session {
+  id: string;
+  title: string;
+  messages: ChatMessage[];
+  lastModified: number;
+}
+
+export interface FilterParams {
+  category?: string;
+  min_price?: number;
+  max_price?: number;
+  keywords?: string;
+  brand?: string;
+}
+
+export const DATA_URL = "https://raw.githubusercontent.com/RezaSbu/Database/refs/heads/main/optimized_products_final_updated.json";
+
+-------------------------
+.\vite.config.ts:
+import path from 'path';
+import { defineConfig, loadEnv } from 'vite';
+
+
+export default defineConfig(({ mode }) => {
+    const env = loadEnv(mode, '.', '');
+    return {
+      server: {
+        port: 3000,
+        host: '0.0.0.0',
+      },
+      plugins: [],
+      define: {
+        'process.env.API_KEY': JSON.stringify(env.GEMINI_API_KEY),
+        'process.env.GEMINI_API_KEY': JSON.stringify(env.GEMINI_API_KEY)
+      },
+      resolve: {
+        alias: {
+          '@': path.resolve(__dirname, '.'),
+        }
+      }
+    };
+});
+
+-------------------------
+.\.git\config:
+[core]
+	repositoryformatversion = 0
+	filemode = false
+	bare = false
+	logallrefupdates = true
+	symlinks = false
+	ignorecase = true
+[remote "origin"]
+	url = https://github.com/RezaSbu/NeuraQueen.git
+	fetch = +refs/heads/*:refs/remotes/origin/*
+[branch "main"]
+	remote = origin
+	merge = refs/heads/main
+	vscode-merge-base = origin/main
+
+-------------------------
+.\.git\description:
+Unnamed repository; edit this file 'description' to name the repository.
+
+-------------------------
+.\.git\HEAD:
+ref: refs/heads/main
+
+-------------------------
+.\.git\packed-refs:
+# pack-refs with: peeled fully-peeled sorted 
+430a1e71314e0b97caa64260716e0cca74a0f76b refs/remotes/origin/main
+
+-------------------------
+.\.git\hooks\applypatch-msg.sample:
+#!/bin/sh
+#
+# An example hook script to check the commit log message taken by
+# applypatch from an e-mail message.
+#
+# The hook should exit with non-zero status after issuing an
+# appropriate message if it wants to stop the commit.  The hook is
+# allowed to edit the commit message file.
+#
+# To enable this hook, rename this file to "applypatch-msg".
+
+. git-sh-setup
+commitmsg="$(git rev-parse --git-path hooks/commit-msg)"
+test -x "$commitmsg" && exec "$commitmsg" ${1+"$@"}
+:
+
+-------------------------
+.\.git\hooks\commit-msg.sample:
+#!/bin/sh
+#
+# An example hook script to check the commit log message.
+# Called by "git commit" with one argument, the name of the file
+# that has the commit message.  The hook should exit with non-zero
+# status after issuing an appropriate message if it wants to stop the
+# commit.  The hook is allowed to edit the commit message file.
+#
+# To enable this hook, rename this file to "commit-msg".
+
+# Uncomment the below to add a Signed-off-by line to the message.
+# Doing this in a hook is a bad idea in general, but the prepare-commit-msg
+# hook is more suited to it.
+#
+# SOB=$(git var GIT_AUTHOR_IDENT | sed -n 's/^\(.*>\).*$/Signed-off-by: \1/p')
+# grep -qs "^$SOB" "$1" || echo "$SOB" >> "$1"
+
+# This example catches duplicate Signed-off-by lines.
+
+test "" = "$(grep '^Signed-off-by: ' "$1" |
+	 sort | uniq -c | sed -e '/^[ 	]*1[ 	]/d')" || {
+	echo >&2 Duplicate Signed-off-by lines.
+	exit 1
+}
+
+-------------------------
+.\.git\hooks\fsmonitor-watchman.sample:
+#!/usr/bin/perl
+
+use strict;
+use warnings;
+use IPC::Open2;
+
+# An example hook script to integrate Watchman
+# (https://facebook.github.io/watchman/) with git to speed up detecting
+# new and modified files.
+#
+# The hook is passed a version (currently 2) and last update token
+# formatted as a string and outputs to stdout a new update token and
+# all files that have been modified since the update token. Paths must
+# be relative to the root of the working tree and separated by a single NUL.
+#
+# To enable this hook, rename this file to "query-watchman" and set
+# 'git config core.fsmonitor .git/hooks/query-watchman'
+#
+my ($version, $last_update_token) = @ARGV;
+
+# Uncomment for debugging
+# print STDERR "$0 $version $last_update_token\n";
+
+# Check the hook interface version
+if ($version ne 2) {
+	die "Unsupported query-fsmonitor hook version '$version'.\n" .
+	    "Falling back to scanning...\n";
+}
+
+my $git_work_tree = get_working_dir();
+
+my $retry = 1;
+
+my $json_pkg;
+eval {
+	require JSON::XS;
+	$json_pkg = "JSON::XS";
+	1;
+} or do {
+	require JSON::PP;
+	$json_pkg = "JSON::PP";
+};
+
+launch_watchman();
+
+sub launch_watchman {
+	my $o = watchman_query();
+	if (is_work_tree_watched($o)) {
+		output_result($o->{clock}, @{$o->{files}});
+	}
+}
+
+sub output_result {
+	my ($clockid, @files) = @_;
+
+	# Uncomment for debugging watchman output
+	# open (my $fh, ">", ".git/watchman-output.out");
+	# binmode $fh, ":utf8";
+	# print $fh "$clockid\n@files\n";
+	# close $fh;
+
+	binmode STDOUT, ":utf8";
+	print $clockid;
+	print "\0";
+	local $, = "\0";
+	print @files;
+}
+
+sub watchman_clock {
+	my $response = qx/watchman clock "$git_work_tree"/;
+	die "Failed to get clock id on '$git_work_tree'.\n" .
+		"Falling back to scanning...\n" if $? != 0;
+
+	return $json_pkg->new->utf8->decode($response);
+}
+
+sub watchman_query {
+	my $pid = open2(\*CHLD_OUT, \*CHLD_IN, 'watchman -j --no-pretty')
+	or die "open2() failed: $!\n" .
+	"Falling back to scanning...\n";
+
+	# In the query expression below we're asking for names of files that
+	# changed since $last_update_token but not from the .git folder.
+	#
+	# To accomplish this, we're using the "since" generator to use the
+	# recency index to select candidate nodes and "fields" to limit the
+	# output to file names only. Then we're using the "expression" term to
+	# further constrain the results.
+	my $last_update_line = "";
+	if (substr($last_update_token, 0, 1) eq "c") {
+		$last_update_token = "\"$last_update_token\"";
+		$last_update_line = qq[\n"since": $last_update_token,];
+	}
+	my $query = <<"	END";
+		["query", "$git_work_tree", {$last_update_line
+			"fields": ["name"],
+			"expression": ["not", ["dirname", ".git"]]
+		}]
+	END
+
+	# Uncomment for debugging the watchman query
+	# open (my $fh, ">", ".git/watchman-query.json");
+	# print $fh $query;
+	# close $fh;
+
+	print CHLD_IN $query;
+	close CHLD_IN;
+	my $response = do {local $/; <CHLD_OUT>};
+
+	# Uncomment for debugging the watch response
+	# open ($fh, ">", ".git/watchman-response.json");
+	# print $fh $response;
+	# close $fh;
+
+	die "Watchman: command returned no output.\n" .
+	"Falling back to scanning...\n" if $response eq "";
+	die "Watchman: command returned invalid output: $response\n" .
+	"Falling back to scanning...\n" unless $response =~ /^\{/;
+
+	return $json_pkg->new->utf8->decode($response);
+}
+
+sub is_work_tree_watched {
+	my ($output) = @_;
+	my $error = $output->{error};
+	if ($retry > 0 and $error and $error =~ m/unable to resolve root .* directory (.*) is not watched/) {
+		$retry--;
+		my $response = qx/watchman watch "$git_work_tree"/;
+		die "Failed to make watchman watch '$git_work_tree'.\n" .
+		    "Falling back to scanning...\n" if $? != 0;
+		$output = $json_pkg->new->utf8->decode($response);
+		$error = $output->{error};
+		die "Watchman: $error.\n" .
+		"Falling back to scanning...\n" if $error;
+
+		# Uncomment for debugging watchman output
+		# open (my $fh, ">", ".git/watchman-output.out");
+		# close $fh;
+
+		# Watchman will always return all files on the first query so
+		# return the fast "everything is dirty" flag to git and do the
+		# Watchman query just to get it over with now so we won't pay
+		# the cost in git to look up each individual file.
+		my $o = watchman_clock();
+		$error = $output->{error};
+
+		die "Watchman: $error.\n" .
+		"Falling back to scanning...\n" if $error;
+
+		output_result($o->{clock}, ("/"));
+		$last_update_token = $o->{clock};
+
+		eval { launch_watchman() };
+		return 0;
+	}
+
+	die "Watchman: $error.\n" .
+	"Falling back to scanning...\n" if $error;
+
+	return 1;
+}
+
+sub get_working_dir {
+	my $working_dir;
+	if ($^O =~ 'msys' || $^O =~ 'cygwin') {
+		$working_dir = Win32::GetCwd();
+		$working_dir =~ tr/\\/\//;
+	} else {
+		require Cwd;
+		$working_dir = Cwd::cwd();
+	}
+
+	return $working_dir;
+}
+
+-------------------------
+.\.git\hooks\post-update.sample:
+#!/bin/sh
+#
+# An example hook script to prepare a packed repository for use over
+# dumb transports.
+#
+# To enable this hook, rename this file to "post-update".
+
+exec git update-server-info
+
+-------------------------
+.\.git\hooks\pre-applypatch.sample:
+#!/bin/sh
+#
+# An example hook script to verify what is about to be committed
+# by applypatch from an e-mail message.
+#
+# The hook should exit with non-zero status after issuing an
+# appropriate message if it wants to stop the commit.
+#
+# To enable this hook, rename this file to "pre-applypatch".
+
+. git-sh-setup
+precommit="$(git rev-parse --git-path hooks/pre-commit)"
+test -x "$precommit" && exec "$precommit" ${1+"$@"}
+:
+
+-------------------------
+.\.git\hooks\pre-commit.sample:
+#!/bin/sh
+#
+# An example hook script to verify what is about to be committed.
+# Called by "git commit" with no arguments.  The hook should
+# exit with non-zero status after issuing an appropriate message if
+# it wants to stop the commit.
+#
+# To enable this hook, rename this file to "pre-commit".
+
+if git rev-parse --verify HEAD >/dev/null 2>&1
+then
+	against=HEAD
+else
+	# Initial commit: diff against an empty tree object
+	against=$(git hash-object -t tree /dev/null)
+fi
+
+# If you want to allow non-ASCII filenames set this variable to true.
+allownonascii=$(git config --type=bool hooks.allownonascii)
+
+# Redirect output to stderr.
+exec 1>&2
+
+# Cross platform projects tend to avoid non-ASCII filenames; prevent
+# them from being added to the repository. We exploit the fact that the
+# printable range starts at the space character and ends with tilde.
+if [ "$allownonascii" != "true" ] &&
+	# Note that the use of brackets around a tr range is ok here, (it's
+	# even required, for portability to Solaris 10's /usr/bin/tr), since
+	# the square bracket bytes happen to fall in the designated range.
+	test $(git diff-index --cached --name-only --diff-filter=A -z $against |
+	  LC_ALL=C tr -d '[ -~]\0' | wc -c) != 0
+then
+	cat <<\EOF
+Error: Attempt to add a non-ASCII file name.
+
+This can cause problems if you want to work with people on other platforms.
+
+To be portable it is advisable to rename the file.
+
+If you know what you are doing you can disable this check using:
+
+  git config hooks.allownonascii true
+EOF
+	exit 1
+fi
+
+# If there are whitespace errors, print the offending file names and fail.
+exec git diff-index --check --cached $against --
+
+-------------------------
+.\.git\hooks\pre-merge-commit.sample:
+#!/bin/sh
+#
+# An example hook script to verify what is about to be committed.
+# Called by "git merge" with no arguments.  The hook should
+# exit with non-zero status after issuing an appropriate message to
+# stderr if it wants to stop the merge commit.
+#
+# To enable this hook, rename this file to "pre-merge-commit".
+
+. git-sh-setup
+test -x "$GIT_DIR/hooks/pre-commit" &&
+        exec "$GIT_DIR/hooks/pre-commit"
+:
+
+-------------------------
+.\.git\hooks\pre-push.sample:
+#!/bin/sh
+
+# An example hook script to verify what is about to be pushed.  Called by "git
+# push" after it has checked the remote status, but before anything has been
+# pushed.  If this script exits with a non-zero status nothing will be pushed.
+#
+# This hook is called with the following parameters:
+#
+# $1 -- Name of the remote to which the push is being done
+# $2 -- URL to which the push is being done
+#
+# If pushing without using a named remote those arguments will be equal.
+#
+# Information about the commits which are being pushed is supplied as lines to
+# the standard input in the form:
+#
+#   <local ref> <local oid> <remote ref> <remote oid>
+#
+# This sample shows how to prevent push of commits where the log message starts
+# with "WIP" (work in progress).
+
+remote="$1"
+url="$2"
+
+zero=$(git hash-object --stdin </dev/null | tr '[0-9a-f]' '0')
+
+while read local_ref local_oid remote_ref remote_oid
+do
+	if test "$local_oid" = "$zero"
+	then
+		# Handle delete
+		:
+	else
+		if test "$remote_oid" = "$zero"
+		then
+			# New branch, examine all commits
+			range="$local_oid"
+		else
+			# Update to existing branch, examine new commits
+			range="$remote_oid..$local_oid"
+		fi
+
+		# Check for WIP commit
+		commit=$(git rev-list -n 1 --grep '^WIP' "$range")
+		if test -n "$commit"
+		then
+			echo >&2 "Found WIP commit in $local_ref, not pushing"
+			exit 1
+		fi
+	fi
+done
+
+exit 0
+
+-------------------------
+.\.git\hooks\pre-rebase.sample:
+#!/bin/sh
+#
+# Copyright (c) 2006, 2008 Junio C Hamano
+#
+# The "pre-rebase" hook is run just before "git rebase" starts doing
+# its job, and can prevent the command from running by exiting with
+# non-zero status.
+#
+# The hook is called with the following parameters:
+#
+# $1 -- the upstream the series was forked from.
+# $2 -- the branch being rebased (or empty when rebasing the current branch).
+#
+# This sample shows how to prevent topic branches that are already
+# merged to 'next' branch from getting rebased, because allowing it
+# would result in rebasing already published history.
+
+publish=next
+basebranch="$1"
+if test "$#" = 2
+then
+	topic="refs/heads/$2"
+else
+	topic=`git symbolic-ref HEAD` ||
+	exit 0 ;# we do not interrupt rebasing detached HEAD
+fi
+
+case "$topic" in
+refs/heads/??/*)
+	;;
+*)
+	exit 0 ;# we do not interrupt others.
+	;;
+esac
+
+# Now we are dealing with a topic branch being rebased
+# on top of master.  Is it OK to rebase it?
+
+# Does the topic really exist?
+git show-ref -q "$topic" || {
+	echo >&2 "No such branch $topic"
+	exit 1
+}
+
+# Is topic fully merged to master?
+not_in_master=`git rev-list --pretty=oneline ^master "$topic"`
+if test -z "$not_in_master"
+then
+	echo >&2 "$topic is fully merged to master; better remove it."
+	exit 1 ;# we could allow it, but there is no point.
+fi
+
+# Is topic ever merged to next?  If so you should not be rebasing it.
+only_next_1=`git rev-list ^master "^$topic" ${publish} | sort`
+only_next_2=`git rev-list ^master           ${publish} | sort`
+if test "$only_next_1" = "$only_next_2"
+then
+	not_in_topic=`git rev-list "^$topic" master`
+	if test -z "$not_in_topic"
+	then
+		echo >&2 "$topic is already up to date with master"
+		exit 1 ;# we could allow it, but there is no point.
+	else
+		exit 0
+	fi
+else
+	not_in_next=`git rev-list --pretty=oneline ^${publish} "$topic"`
+	/usr/bin/perl -e '
+		my $topic = $ARGV[0];
+		my $msg = "* $topic has commits already merged to public branch:\n";
+		my (%not_in_next) = map {
+			/^([0-9a-f]+) /;
+			($1 => 1);
+		} split(/\n/, $ARGV[1]);
+		for my $elem (map {
+				/^([0-9a-f]+) (.*)$/;
+				[$1 => $2];
+			} split(/\n/, $ARGV[2])) {
+			if (!exists $not_in_next{$elem->[0]}) {
+				if ($msg) {
+					print STDERR $msg;
+					undef $msg;
+				}
+				print STDERR " $elem->[1]\n";
+			}
+		}
+	' "$topic" "$not_in_next" "$not_in_master"
+	exit 1
+fi
+
+<<\DOC_END
+
+This sample hook safeguards topic branches that have been
+published from being rewound.
+
+The workflow assumed here is:
+
+ * Once a topic branch forks from "master", "master" is never
+   merged into it again (either directly or indirectly).
+
+ * Once a topic branch is fully cooked and merged into "master",
+   it is deleted.  If you need to build on top of it to correct
+   earlier mistakes, a new topic branch is created by forking at
+   the tip of the "master".  This is not strictly necessary, but
+   it makes it easier to keep your history simple.
+
+ * Whenever you need to test or publish your changes to topic
+   branches, merge them into "next" branch.
+
+The script, being an example, hardcodes the publish branch name
+to be "next", but it is trivial to make it configurable via
+$GIT_DIR/config mechanism.
+
+With this workflow, you would want to know:
+
+(1) ... if a topic branch has ever been merged to "next".  Young
+    topic branches can have stupid mistakes you would rather
+    clean up before publishing, and things that have not been
+    merged into other branches can be easily rebased without
+    affecting other people.  But once it is published, you would
+    not want to rewind it.
+
+(2) ... if a topic branch has been fully merged to "master".
+    Then you can delete it.  More importantly, you should not
+    build on top of it -- other people may already want to
+    change things related to the topic as patches against your
+    "master", so if you need further changes, it is better to
+    fork the topic (perhaps with the same name) afresh from the
+    tip of "master".
+
+Let's look at this example:
+
+		   o---o---o---o---o---o---o---o---o---o "next"
+		  /       /           /           /
+		 /   a---a---b A     /           /
+		/   /               /           /
+	       /   /   c---c---c---c B         /
+	      /   /   /             \         /
+	     /   /   /   b---b C     \       /
+	    /   /   /   /             \     /
+    ---o---o---o---o---o---o---o---o---o---o---o "master"
+
+
+A, B and C are topic branches.
+
+ * A has one fix since it was merged up to "next".
+
+ * B has finished.  It has been fully merged up to "master" and "next",
+   and is ready to be deleted.
+
+ * C has not merged to "next" at all.
+
+We would want to allow C to be rebased, refuse A, and encourage
+B to be deleted.
+
+To compute (1):
+
+	git rev-list ^master ^topic next
+	git rev-list ^master        next
+
+	if these match, topic has not merged in next at all.
+
+To compute (2):
+
+	git rev-list master..topic
+
+	if this is empty, it is fully merged to "master".
+
+DOC_END
+
+-------------------------
+.\.git\hooks\pre-receive.sample:
+#!/bin/sh
+#
+# An example hook script to make use of push options.
+# The example simply echoes all push options that start with 'echoback='
+# and rejects all pushes when the "reject" push option is used.
+#
+# To enable this hook, rename this file to "pre-receive".
+
+if test -n "$GIT_PUSH_OPTION_COUNT"
+then
+	i=0
+	while test "$i" -lt "$GIT_PUSH_OPTION_COUNT"
+	do
+		eval "value=\$GIT_PUSH_OPTION_$i"
+		case "$value" in
+		echoback=*)
+			echo "echo from the pre-receive-hook: ${value#*=}" >&2
+			;;
+		reject)
+			exit 1
+		esac
+		i=$((i + 1))
+	done
+fi
+
+-------------------------
+.\.git\hooks\prepare-commit-msg.sample:
+#!/bin/sh
+#
+# An example hook script to prepare the commit log message.
+# Called by "git commit" with the name of the file that has the
+# commit message, followed by the description of the commit
+# message's source.  The hook's purpose is to edit the commit
+# message file.  If the hook fails with a non-zero status,
+# the commit is aborted.
+#
+# To enable this hook, rename this file to "prepare-commit-msg".
+
+# This hook includes three examples. The first one removes the
+# "# Please enter the commit message..." help message.
+#
+# The second includes the output of "git diff --name-status -r"
+# into the message, just before the "git status" output.  It is
+# commented because it doesn't cope with --amend or with squashed
+# commits.
+#
+# The third example adds a Signed-off-by line to the message, that can
+# still be edited.  This is rarely a good idea.
+
+COMMIT_MSG_FILE=$1
+COMMIT_SOURCE=$2
+SHA1=$3
+
+/usr/bin/perl -i.bak -ne 'print unless(m/^. Please enter the commit message/..m/^#$/)' "$COMMIT_MSG_FILE"
+
+# case "$COMMIT_SOURCE,$SHA1" in
+#  ,|template,)
+#    /usr/bin/perl -i.bak -pe '
+#       print "\n" . `git diff --cached --name-status -r`
+# 	 if /^#/ && $first++ == 0' "$COMMIT_MSG_FILE" ;;
+#  *) ;;
+# esac
+
+# SOB=$(git var GIT_COMMITTER_IDENT | sed -n 's/^\(.*>\).*$/Signed-off-by: \1/p')
+# git interpret-trailers --in-place --trailer "$SOB" "$COMMIT_MSG_FILE"
+# if test -z "$COMMIT_SOURCE"
+# then
+#   /usr/bin/perl -i.bak -pe 'print "\n" if !$first_line++' "$COMMIT_MSG_FILE"
+# fi
+
+-------------------------
+.\.git\hooks\push-to-checkout.sample:
+#!/bin/sh
+
+# An example hook script to update a checked-out tree on a git push.
+#
+# This hook is invoked by git-receive-pack(1) when it reacts to git
+# push and updates reference(s) in its repository, and when the push
+# tries to update the branch that is currently checked out and the
+# receive.denyCurrentBranch configuration variable is set to
+# updateInstead.
+#
+# By default, such a push is refused if the working tree and the index
+# of the remote repository has any difference from the currently
+# checked out commit; when both the working tree and the index match
+# the current commit, they are updated to match the newly pushed tip
+# of the branch. This hook is to be used to override the default
+# behaviour; however the code below reimplements the default behaviour
+# as a starting point for convenient modification.
+#
+# The hook receives the commit with which the tip of the current
+# branch is going to be updated:
+commit=$1
+
+# It can exit with a non-zero status to refuse the push (when it does
+# so, it must not modify the index or the working tree).
+die () {
+	echo >&2 "$*"
+	exit 1
+}
+
+# Or it can make any necessary changes to the working tree and to the
+# index to bring them to the desired state when the tip of the current
+# branch is updated to the new commit, and exit with a zero status.
+#
+# For example, the hook can simply run git read-tree -u -m HEAD "$1"
+# in order to emulate git fetch that is run in the reverse direction
+# with git push, as the two-tree form of git read-tree -u -m is
+# essentially the same as git switch or git checkout that switches
+# branches while keeping the local changes in the working tree that do
+# not interfere with the difference between the branches.
+
+# The below is a more-or-less exact translation to shell of the C code
+# for the default behaviour for git's push-to-checkout hook defined in
+# the push_to_deploy() function in builtin/receive-pack.c.
+#
+# Note that the hook will be executed from the repository directory,
+# not from the working tree, so if you want to perform operations on
+# the working tree, you will have to adapt your code accordingly, e.g.
+# by adding "cd .." or using relative paths.
+
+if ! git update-index -q --ignore-submodules --refresh
+then
+	die "Up-to-date check failed"
+fi
+
+if ! git diff-files --quiet --ignore-submodules --
+then
+	die "Working directory has unstaged changes"
+fi
+
+# This is a rough translation of:
+#
+#   head_has_history() ? "HEAD" : EMPTY_TREE_SHA1_HEX
+if git cat-file -e HEAD 2>/dev/null
+then
+	head=HEAD
+else
+	head=$(git hash-object -t tree --stdin </dev/null)
+fi
+
+if ! git diff-index --quiet --cached --ignore-submodules $head --
+then
+	die "Working directory has staged changes"
+fi
+
+if ! git read-tree -u -m "$commit"
+then
+	die "Could not update working tree to new HEAD"
+fi
+
+-------------------------
+.\.git\hooks\sendemail-validate.sample:
+#!/bin/sh
+
+# An example hook script to validate a patch (and/or patch series) before
+# sending it via email.
+#
+# The hook should exit with non-zero status after issuing an appropriate
+# message if it wants to prevent the email(s) from being sent.
+#
+# To enable this hook, rename this file to "sendemail-validate".
+#
+# By default, it will only check that the patch(es) can be applied on top of
+# the default upstream branch without conflicts in a secondary worktree. After
+# validation (successful or not) of the last patch of a series, the worktree
+# will be deleted.
+#
+# The following config variables can be set to change the default remote and
+# remote ref that are used to apply the patches against:
+#
+#   sendemail.validateRemote (default: origin)
+#   sendemail.validateRemoteRef (default: HEAD)
+#
+# Replace the TODO placeholders with appropriate checks according to your
+# needs.
+
+validate_cover_letter () {
+	file="$1"
+	# TODO: Replace with appropriate checks (e.g. spell checking).
+	true
+}
+
+validate_patch () {
+	file="$1"
+	# Ensure that the patch applies without conflicts.
+	git am -3 "$file" || return
+	# TODO: Replace with appropriate checks for this patch
+	# (e.g. checkpatch.pl).
+	true
+}
+
+validate_series () {
+	# TODO: Replace with appropriate checks for the whole series
+	# (e.g. quick build, coding style checks, etc.).
+	true
+}
+
+# main -------------------------------------------------------------------------
+
+if test "$GIT_SENDEMAIL_FILE_COUNTER" = 1
+then
+	remote=$(git config --default origin --get sendemail.validateRemote) &&
+	ref=$(git config --default HEAD --get sendemail.validateRemoteRef) &&
+	worktree=$(mktemp --tmpdir -d sendemail-validate.XXXXXXX) &&
+	git worktree add -fd --checkout "$worktree" "refs/remotes/$remote/$ref" &&
+	git config --replace-all sendemail.validateWorktree "$worktree"
+else
+	worktree=$(git config --get sendemail.validateWorktree)
+fi || {
+	echo "sendemail-validate: error: failed to prepare worktree" >&2
+	exit 1
+}
+
+unset GIT_DIR GIT_WORK_TREE
+cd "$worktree" &&
+
+if grep -q "^diff --git " "$1"
+then
+	validate_patch "$1"
+else
+	validate_cover_letter "$1"
+fi &&
+
+if test "$GIT_SENDEMAIL_FILE_COUNTER" = "$GIT_SENDEMAIL_FILE_TOTAL"
+then
+	git config --unset-all sendemail.validateWorktree &&
+	trap 'git worktree remove -ff "$worktree"' EXIT &&
+	validate_series
+fi
+
+-------------------------
+.\.git\hooks\update.sample:
+#!/bin/sh
+#
+# An example hook script to block unannotated tags from entering.
+# Called by "git receive-pack" with arguments: refname sha1-old sha1-new
+#
+# To enable this hook, rename this file to "update".
+#
+# Config
+# ------
+# hooks.allowunannotated
+#   This boolean sets whether unannotated tags will be allowed into the
+#   repository.  By default they won't be.
+# hooks.allowdeletetag
+#   This boolean sets whether deleting tags will be allowed in the
+#   repository.  By default they won't be.
+# hooks.allowmodifytag
+#   This boolean sets whether a tag may be modified after creation. By default
+#   it won't be.
+# hooks.allowdeletebranch
+#   This boolean sets whether deleting branches will be allowed in the
+#   repository.  By default they won't be.
+# hooks.denycreatebranch
+#   This boolean sets whether remotely creating branches will be denied
+#   in the repository.  By default this is allowed.
+#
+
+# --- Command line
+refname="$1"
+oldrev="$2"
+newrev="$3"
+
+# --- Safety check
+if [ -z "$GIT_DIR" ]; then
+	echo "Don't run this script from the command line." >&2
+	echo " (if you want, you could supply GIT_DIR then run" >&2
+	echo "  $0 <ref> <oldrev> <newrev>)" >&2
+	exit 1
+fi
+
+if [ -z "$refname" -o -z "$oldrev" -o -z "$newrev" ]; then
+	echo "usage: $0 <ref> <oldrev> <newrev>" >&2
+	exit 1
+fi
+
+# --- Config
+allowunannotated=$(git config --type=bool hooks.allowunannotated)
+allowdeletebranch=$(git config --type=bool hooks.allowdeletebranch)
+denycreatebranch=$(git config --type=bool hooks.denycreatebranch)
+allowdeletetag=$(git config --type=bool hooks.allowdeletetag)
+allowmodifytag=$(git config --type=bool hooks.allowmodifytag)
+
+# check for no description
+projectdesc=$(sed -e '1q' "$GIT_DIR/description")
+case "$projectdesc" in
+"Unnamed repository"* | "")
+	echo "*** Project description file hasn't been set" >&2
+	exit 1
+	;;
+esac
+
+# --- Check types
+# if $newrev is 0000...0000, it's a commit to delete a ref.
+zero=$(git hash-object --stdin </dev/null | tr '[0-9a-f]' '0')
+if [ "$newrev" = "$zero" ]; then
+	newrev_type=delete
+else
+	newrev_type=$(git cat-file -t $newrev)
+fi
+
+case "$refname","$newrev_type" in
+	refs/tags/*,commit)
+		# un-annotated tag
+		short_refname=${refname##refs/tags/}
+		if [ "$allowunannotated" != "true" ]; then
+			echo "*** The un-annotated tag, $short_refname, is not allowed in this repository" >&2
+			echo "*** Use 'git tag [ -a | -s ]' for tags you want to propagate." >&2
+			exit 1
+		fi
+		;;
+	refs/tags/*,delete)
+		# delete tag
+		if [ "$allowdeletetag" != "true" ]; then
+			echo "*** Deleting a tag is not allowed in this repository" >&2
+			exit 1
+		fi
+		;;
+	refs/tags/*,tag)
+		# annotated tag
+		if [ "$allowmodifytag" != "true" ] && git rev-parse $refname > /dev/null 2>&1
+		then
+			echo "*** Tag '$refname' already exists." >&2
+			echo "*** Modifying a tag is not allowed in this repository." >&2
+			exit 1
+		fi
+		;;
+	refs/heads/*,commit)
+		# branch
+		if [ "$oldrev" = "$zero" -a "$denycreatebranch" = "true" ]; then
+			echo "*** Creating a branch is not allowed in this repository" >&2
+			exit 1
+		fi
+		;;
+	refs/heads/*,delete)
+		# delete branch
+		if [ "$allowdeletebranch" != "true" ]; then
+			echo "*** Deleting a branch is not allowed in this repository" >&2
+			exit 1
+		fi
+		;;
+	refs/remotes/*,commit)
+		# tracking branch
+		;;
+	refs/remotes/*,delete)
+		# delete tracking branch
+		if [ "$allowdeletebranch" != "true" ]; then
+			echo "*** Deleting a tracking branch is not allowed in this repository" >&2
+			exit 1
+		fi
+		;;
+	*)
+		# Anything else (is there anything else?)
+		echo "*** Update hook: unknown type of update to ref $refname of type $newrev_type" >&2
+		exit 1
+		;;
+esac
+
+# --- Finished
+exit 0
+
+-------------------------
+.\.git\info\exclude:
+# git ls-files --others --exclude-from=.git/info/exclude
+# Lines that start with '#' are comments.
+# For a project mostly in C, the following would be a good set of
+# exclude patterns (uncomment them if you want to use them):
+# *.[oa]
+# *~
+
+-------------------------
+.\.git\logs\HEAD:
+0000000000000000000000000000000000000000 430a1e71314e0b97caa64260716e0cca74a0f76b RezaSbu <Ahmadireza582@gmail.com> 1765031838 +0330	clone: from https://github.com/RezaSbu/NeuraQueen.git
+
+-------------------------
+.\.git\logs\refs\heads\main:
+0000000000000000000000000000000000000000 430a1e71314e0b97caa64260716e0cca74a0f76b RezaSbu <Ahmadireza582@gmail.com> 1765031838 +0330	clone: from https://github.com/RezaSbu/NeuraQueen.git
+
+-------------------------
+.\.git\logs\refs\remotes\origin\HEAD:
+0000000000000000000000000000000000000000 430a1e71314e0b97caa64260716e0cca74a0f76b RezaSbu <Ahmadireza582@gmail.com> 1765031838 +0330	clone: from https://github.com/RezaSbu/NeuraQueen.git
+
+-------------------------
+.\.git\refs\heads\main:
+430a1e71314e0b97caa64260716e0cca74a0f76b
+
+-------------------------
+.\.git\refs\remotes\origin\HEAD:
+ref: refs/remotes/origin/main
+
+-------------------------
+.\components\ChatMessage.tsx:
+
+import React, { useState, useEffect, memo } from 'react';
+import { ChatMessage as ChatMessageType, ProductMatch } from '../types';
+import ProductCard from './ProductCard';
+import Typewriter from './Typewriter';
+import ReactMarkdown from 'react-markdown';
+import { User, Cpu, BrainCircuit } from 'lucide-react';
+
+interface Props {
+  message: ChatMessageType;
+  isLastMessage: boolean;
+  onCompare: (product: ProductMatch) => void;
+  compareList: ProductMatch[];
+}
+
+const ChatMessage: React.FC<Props> = ({ message, isLastMessage, onCompare, compareList }) => {
+  const isUser = message.role === 'user';
+  const hasProducts = message.products && message.products.length > 0;
+  
+  // Logic to determine if we should animate:
+  // 1. It must be the last message.
+  // 2. It must be recent (created in the last 10 seconds). 
+  // This prevents re-typing when loading history or switching sessions.
+  const isRecent = message.timestamp ? (Date.now() - message.timestamp < 10000) : true;
+  const shouldAnimate = !isUser && isLastMessage && isRecent;
+
+  const [isTyped, setIsTyped] = useState(!shouldAnimate);
+
+  useEffect(() => {
+     // If it stops being the last message, force it to 'typed' state immediately.
+     if (!isLastMessage) {
+         setIsTyped(true);
+     }
+  }, [isLastMessage]);
+
+  return (
+    <div className={`flex w-full mb-8 ${isUser ? 'justify-end' : 'justify-start'} animate-fadeIn group`}>
+      <div className={`flex max-w-[95%] md:max-w-[85%] gap-4 ${isUser ? 'flex-row-reverse' : 'flex-row'}`}>
+        
+        {/* Avatar */}
+        <div className={`
+          w-10 h-10 rounded-2xl flex items-center justify-center shrink-0 shadow-2xl border border-white/10
+          ${isUser 
+            ? 'bg-gradient-to-br from-gray-700 to-gray-800 text-gray-300' 
+            : 'bg-gradient-to-br from-[#00D084] to-[#00A060] text-black shadow-primary/20'}
+        `}>
+          {isUser ? <User size={20} /> : <BrainCircuit size={22} />}
+        </div>
+
+        {/* Content Container */}
+        <div className="flex flex-col gap-3 w-full min-w-0">
+           
+           {/* Header Name (Bot only) */}
+           {!isUser && (
+             <span className="text-xs font-bold text-gray-500 mb-[-5px] mr-1">Mobinext AI</span>
+           )}
+
+           {/* Text Bubble */}
+           {message.text && !message.isThinking && (
+             <div className={`
+              px-6 py-5 rounded-3xl text-[15px] leading-8 shadow-sm backdrop-blur-sm
+              ${isUser 
+                ? 'bg-[#2A2A2A] text-white rounded-tr-md border border-white/5' 
+                : 'bg-[#1E1E1E]/80 text-gray-100 rounded-tl-md border border-white/5'}
+            `}>
+              {!isTyped ? (
+                  <Typewriter 
+                      text={message.text} 
+                      speed={15} 
+                      onComplete={() => setIsTyped(true)} 
+                  />
+              ) : (
+                  <div className="markdown-content">
+                    <ReactMarkdown
+                        components={{
+                        strong: ({node, ...props}) => <span className="font-bold text-primary" {...props} />,
+                        ul: ({node, ...props}) => <ul className="list-disc list-inside my-2 space-y-1 text-gray-300" {...props} />,
+                        p: ({node, ...props}) => <p className="mb-2 last:mb-0" {...props} />,
+                        a: ({node, ...props}) => <a className="text-blue-400 hover:underline" target="_blank" {...props} />
+                        }}
+                    >
+                        {message.text}
+                    </ReactMarkdown>
+                  </div>
+              )}
+            </div>
+           )}
+
+           {/* Thinking State */}
+           {message.isThinking && (
+             <div className="flex items-center gap-3 px-5 py-4 bg-[#1E1E1E]/50 border border-white/5 rounded-3xl rounded-tl-md w-fit">
+               <div className="relative w-8 h-8 flex items-center justify-center">
+                  <div className="absolute inset-0 border-2 border-primary/30 rounded-full animate-ping"></div>
+                  <div className="absolute inset-0 border-2 border-primary rounded-full animate-spin border-t-transparent"></div>
+                  <Cpu size={14} className="text-primary" />
+               </div>
+               <span className="text-sm font-medium text-gray-400 animate-pulse">در حال تحلیل...</span>
+             </div>
+           )}
+
+            {/* Product Grid - Show if typed OR if it's an old message */}
+            {hasProducts && (isTyped || !isLastMessage) && (
+             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 mt-2 animate-slideUp">
+               {message.products?.map((product, idx) => (
+                 <ProductCard 
+                   key={`${product.id}-${idx}`} 
+                   product={product} 
+                   index={idx}
+                   onCompare={onCompare}
+                   isSelectedForCompare={compareList.some(p => p.title === product.title)}
+                 />
+               ))}
+             </div>
+           )}
+        </div>
+      </div>
+    </div>
+  );
+};
+
+export default memo(ChatMessage);
+
+-------------------------
+.\components\ComparisonModal.tsx:
+
+import React from 'react';
+import { ProductMatch } from '../types';
+import { X, ExternalLink } from 'lucide-react';
+
+interface Props {
+  products: ProductMatch[];
+  onClose: () => void;
+}
+
+const ComparisonModal: React.FC<Props> = ({ products, onClose }) => {
+  const formatPrice = (p: number | string) => new Intl.NumberFormat('fa-IR').format(Number(p));
+
+  // Collect all unique features found in these products to build rows
+  // Since normalized features are strings, we might just list them.
+  // For a better table, we would assume Key: Value structure in strings.
+  
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-fadeIn">
+      <div className="bg-[#1a1a1a] w-full max-w-5xl rounded-2xl border border-white/10 shadow-2xl flex flex-col max-h-[90vh]">
+        
+        {/* Header */}
+        <div className="flex items-center justify-between p-4 border-b border-white/10">
+          <h2 className="text-xl font-bold text-white">مقایسه محصولات ({products.length})</h2>
+          <button onClick={onClose} className="p-2 hover:bg-white/10 rounded-full transition-colors">
+            <X size={24} />
+          </button>
+        </div>
+
+        {/* Table Container */}
+        <div className="overflow-auto p-4 flex-1 scrollbar-thin">
+          <table className="w-full text-right border-collapse">
+            <thead>
+              <tr>
+                <th className="p-4 text-gray-500 font-normal min-w-[120px]">مشخصات</th>
+                {products.map((p, i) => (
+                  <th key={i} className="p-4 min-w-[220px] bg-white/5 rounded-t-xl mx-2 border-b border-white/10 align-top">
+                    <div className="flex flex-col gap-3">
+                      {p.image && (
+                        <div className="h-32 w-full rounded-lg overflow-hidden bg-black">
+                           <img src={p.image} alt={p.title} className="w-full h-full object-contain" />
+                        </div>
+                      )}
+                      <span className="text-sm font-bold text-white line-clamp-2 h-10">{p.title}</span>
+                      <div className="text-primary font-mono text-lg">{formatPrice(p.price)} <span className="text-xs">تومان</span></div>
+                    </div>
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-white/5">
+              
+              {/* Category */}
+              <tr>
+                <td className="p-4 text-gray-400">دسته‌بندی</td>
+                {products.map((p, i) => (
+                  <td key={i} className="p-4 text-gray-200">{p.category || '-'}</td>
+                ))}
+              </tr>
+
+              {/* Features List */}
+              <tr>
+                 <td className="p-4 text-gray-400 align-top">ویژگی‌ها</td>
+                 {products.map((p, i) => (
+                   <td key={i} className="p-4 align-top">
+                     <ul className="list-disc list-inside text-sm text-gray-300 space-y-1">
+                       {p.features?.map((f, idx) => (
+                         <li key={idx}>{f}</li>
+                       ))}
+                     </ul>
+                   </td>
+                 ))}
+              </tr>
+
+              {/* Action */}
+              <tr>
+                <td className="p-4"></td>
+                {products.map((p, i) => (
+                  <td key={i} className="p-4">
+                    <a 
+                      href={p.link} 
+                      target="_blank" 
+                      className="flex items-center justify-center gap-2 w-full bg-primary hover:bg-green-400 text-black font-bold py-2 rounded-lg transition-colors"
+                    >
+                      خرید <ExternalLink size={16} />
+                    </a>
+                  </td>
+                ))}
+              </tr>
+
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+export default ComparisonModal;
+
+-------------------------
+.\components\ProductCard.tsx:
+
+import React from 'react';
+import { ProductMatch } from '../types';
+import { ShoppingCart, ExternalLink, Sparkles, Scale } from 'lucide-react';
+
+interface Props {
+  product: ProductMatch;
+  index: number;
+  onCompare: (product: ProductMatch) => void;
+  isSelectedForCompare: boolean;
+}
+
+const ProductCard: React.FC<Props> = ({ product, index, onCompare, isSelectedForCompare }) => {
+  const formatPrice = (p: number | string) => {
+    return new Intl.NumberFormat('fa-IR').format(Number(p));
+  };
+
+  const displayFeatures = product.features?.slice(0, 3) || [];
+
+  return (
+    <div className={`
+      group relative flex flex-col w-72 h-[420px] rounded-3xl overflow-hidden 
+      transition-all duration-300 hover:-translate-y-2
+      ${product.isCloseMatch 
+        ? 'bg-gradient-to-b from-[#2a2a2a] to-[#1a1a00] border border-yellow-500/20' 
+        : 'bg-[#1E1E1E] border border-white/5 hover:border-primary/40'}
+       shadow-lg hover:shadow-2xl hover:shadow-primary/5
+    `}>
+      
+      {/* Number Badge */}
+      <div className="absolute top-3 left-3 z-20 w-8 h-8 rounded-full bg-black/60 backdrop-blur-md border border-white/10 flex items-center justify-center text-white font-mono font-bold shadow-lg">
+        {index + 1}
+      </div>
+
+      {/* Compare Checkbox */}
+      <div className="absolute top-3 right-3 z-20">
+        <button 
+          onClick={(e) => { e.preventDefault(); onCompare(product); }}
+          className={`
+            p-2 rounded-full backdrop-blur-md border transition-all duration-200
+            ${isSelectedForCompare 
+              ? 'bg-primary text-black border-primary' 
+              : 'bg-black/40 text-gray-400 border-white/10 hover:bg-white/10 hover:text-white'}
+          `}
+          title="افزودن به مقایسه"
+        >
+          <Scale size={16} />
+        </button>
+      </div>
+
+      {/* Close Match Label */}
+      {product.isCloseMatch && (
+        <div className="absolute top-14 right-3 z-20 bg-yellow-500/90 text-black text-[10px] font-bold px-2 py-1 rounded-md flex items-center gap-1 shadow-lg backdrop-blur-sm">
+          <Sparkles size={10} />
+          <span>پیشنهاد مشابه</span>
+        </div>
+      )}
+
+      {/* Image Section */}
+      <div className="h-48 bg-gray-900 relative overflow-hidden shrink-0 group">
+        {product.image ? (
+            <img 
+              src={product.image} 
+              alt={product.title} 
+              className="w-full h-full object-cover opacity-90 group-hover:opacity-100 group-hover:scale-105 transition-all duration-500" 
+            />
+        ) : (
+            <div className="w-full h-full flex items-center justify-center bg-gray-800 text-gray-600">
+               <span className="text-xs">تصویر موجود نیست</span>
+            </div>
+        )}
+        <div className="absolute inset-0 bg-gradient-to-t from-[#1E1E1E] via-transparent to-transparent opacity-100" />
+      </div>
+
+      {/* Content Section */}
+      <div className="p-5 flex flex-col flex-1 relative -mt-8">
+        
+        {/* Category */}
+        <div className="mb-2">
+            <span className="inline-block bg-white/5 border border-white/5 backdrop-blur-sm text-gray-400 text-[10px] px-2 py-1 rounded-md">
+                {product.category || 'لوازم جانبی'}
+            </span>
+        </div>
+
+        {/* Title */}
+        <h3 className="text-sm font-bold text-gray-100 mb-3 line-clamp-2 leading-relaxed h-10 group-hover:text-primary transition-colors">
+          {product.title}
+        </h3>
+
+        {/* Features */}
+        <div className="flex flex-col gap-1 mb-auto">
+          {displayFeatures.map((f, i) => (
+            <div key={i} className="flex items-center gap-1.5 text-[11px] text-gray-400">
+               <span className="w-1 h-1 rounded-full bg-primary/50"></span>
+               <span className="truncate">{f}</span>
+            </div>
+          ))}
+        </div>
+
+        {/* Price & Action */}
+        <div className="mt-4 pt-3 border-t border-white/5">
+          <div className="flex flex-col mb-3">
+             <span className="text-[10px] text-gray-500 mb-0.5">قیمت نهایی</span>
+             <div className="text-white font-mono font-bold text-lg flex items-center gap-1">
+                 {formatPrice(product.price)} 
+                 <span className="text-[11px] text-gray-400 font-sans font-normal">تومان</span>
+             </div>
+          </div>
+
+          <a 
+            href={product.link} 
+            target="_blank" 
+            rel="noopener noreferrer"
+            className="flex items-center justify-center gap-2 w-full bg-white/5 hover:bg-primary hover:text-black text-white border border-white/10 hover:border-primary text-sm font-medium py-2.5 rounded-xl transition-all duration-300 group/btn shadow-lg shadow-black/50"
+          >
+            <span>مشاهده و خرید</span>
+            <ExternalLink size={16} className="group-hover/btn:-translate-y-0.5 group-hover/btn:translate-x-0.5 transition-transform" />
+          </a>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+export default ProductCard;
+
+-------------------------
+.\components\Typewriter.tsx:
+
+import React, { useState, useEffect, useRef } from 'react';
+import ReactMarkdown from 'react-markdown';
+
+interface Props {
+  text: string;
+  onComplete?: () => void;
+  speed?: number;
+}
+
+const Typewriter: React.FC<Props> = ({ text, onComplete, speed = 10 }) => {
+  const [displayedText, setDisplayedText] = useState('');
+  
+  // Use a ref to store the latest callback. 
+  // This prevents the useEffect from resetting when the parent re-renders and creates a new function reference.
+  const onCompleteRef = useRef(onComplete);
+
+  useEffect(() => {
+    onCompleteRef.current = onComplete;
+  }, [onComplete]);
+  
+  useEffect(() => {
+    let index = 0;
+    setDisplayedText(''); // Reset text when "text" prop actually changes
+
+    const intervalId = setInterval(() => {
+      setDisplayedText((prev) => {
+        // If we reached the end, clear interval and call complete
+        if (index >= text.length) {
+          clearInterval(intervalId);
+          if (onCompleteRef.current) onCompleteRef.current();
+          return text;
+        }
+        return text.slice(0, index + 1);
+      });
+      index++;
+    }, speed);
+
+    return () => clearInterval(intervalId);
+  }, [text, speed]); // Removed onComplete from dependencies
+
+  return (
+    <div className={`markdown-content ${displayedText.length < text.length ? 'typing-cursor' : ''}`}>
+      <ReactMarkdown
+        components={{
+          strong: ({node, ...props}) => <span className="font-bold text-primary" {...props} />,
+          ul: ({node, ...props}) => <ul className="list-disc list-inside my-2 space-y-1 text-gray-300" {...props} />,
+          p: ({node, ...props}) => <p className="mb-2 last:mb-0" {...props} />,
+          a: ({node, ...props}) => <a className="text-blue-400 hover:underline" target="_blank" {...props} />
+        }}
+      >
+        {displayedText}
+      </ReactMarkdown>
+    </div>
+  );
+};
+
+export default Typewriter;
+
+-------------------------
+.\services\geminiService.ts:
+
+import { GoogleGenAI, FunctionDeclaration, Type, Content } from "@google/genai";
+import { searchProducts } from "./productService";
+import { FilterParams, ChatMessage } from "../types";
+
+// PROMPTS
+const BASE_PROMPT = `
+شما "Mobinext" 🤖، دستیار هوشمند و متخصص فروشگاه "استار سیکلت" هستید.
+شما یک فروشنده حرفه ای هستید، نه یک موتور جستجو.
+
+🚩 **پروتکل فروش (Sales Funnel):**
+مکالمه شما باید ۳ مرحله داشته باشد:
+
+1. **مرحله اکتشاف (Discovery):**
+   - اگر کاربر محصولی خواست (مثلاً "روغن موتور" یا "کلاه کاسکت")، سریعاً لیست ندهید.
+   - **باید** سوال بپرسید تا نیاز دقیق بر اساس **مشخصات فنی و عنوان** (Title/Features) مشخص شود.
+   - ⛔ **ممنوعیت:** هرگز درباره "توضیحات" (Description) یا موارد کلی و سلیقه‌ای سوال نپرسید.
+   - **سوالات مجاز (فقط موارد زیر):**
+     ۱. **نوع/مدل** (مرتبط با عنوان محصول)
+     ۲. **قیمت/بودجه** (تومان)
+     ۳. **سایز** (برای لباس/کلاه)
+     ۴. **حجم/لیتر** (برای روغن/تمیزکننده‌ها)
+     ۵. **برند**
+   - قانون: در هر نوبت حداکثر ۲ سوال بپرسید.
+
+2. **مرحله تایید (Confirmation):**
+   - وقتی جواب ها را گرفتید، یک خلاصه بگویید (مثلاً: "پس یک روغن موتور ۱ لیتری تا ۲۰۰ هزار تومان میخواهید؟")
+   - اگر اطلاعات کافی بود، سراغ مرحله ۳ بروید.
+
+3. **مرحله پیشنهاد (Action):**
+   - حالا از ابزار \`query_knowledge_base\` استفاده کنید.
+   - نتایج را نشان دهید و توضیح دهید چرا مناسب هستند.
+
+⛔ **نبایدهای مطلق:**
+- هرگز قبل از دانستن "بودجه" و "نوع محصول" جستجو نکنید (مگر اینکه کاربر بگوید "همه مدل ها را نشان بده").
+- فیلترینگ شما هرگز نباید بر اساس متن توضیحات (Description) باشد. فقط عنوان، ویژگی‌ها، سایز، حجم و قیمت ملاک است.
+`;
+
+const RAG_SYSTEM_PROMPT = `
+📦 **نحوه نمایش محصولات:**
+- وقتی محصولات را پیدا کردید، آنها را با فرمت جذاب لیست کنید.
+- قانون 70/30: اگر محصول دقیق نبود، محصول مشابه با قیمت نزدیک پیشنهاد دهید.
+- قیمت ها را حتما به تومان ذکر کنید.
+`;
+
+// Tool Definition
+const queryKnowledgeBaseTool: FunctionDeclaration = {
+  name: "query_knowledge_base",
+  description: "جستجو در دیتابیس محصولات بر اساس عنوان، ویژگی‌ها، سایز، حجم و قیمت. (توضیحات محصول نادیده گرفته می‌شود)",
+  parameters: {
+    type: Type.OBJECT,
+    properties: {
+      category: {
+        type: Type.STRING,
+        description: "دسته بندی اصلی یا نوع محصول (کلاه کاسکت، روغن موتور، اگزوز)"
+      },
+      min_price: {
+        type: Type.NUMBER,
+        description: "کف قیمت (اگر مشخص نیست 0)"
+      },
+      max_price: {
+        type: Type.NUMBER,
+        description: "سقف بودجه کاربر (تومان)"
+      },
+      keywords: {
+        type: Type.STRING,
+        description: "کلمات کلیدی فنی: سایز (L, XL)، حجم (1L, 4L)، برند، یا مدل خاص موجود در عنوان."
+      },
+      brand: {
+        type: Type.STRING,
+        description: "برند خاص"
+      }
+    },
+    required: ["category"]
+  }
+};
+
+let genAI: GoogleGenAI | null = null;
+
+const getClient = () => {
+    if (!genAI) {
+        genAI = new GoogleGenAI({ apiKey: process.env.API_KEY });
+    }
+    return genAI;
+};
+
+// Map UI ChatMessages to Gemini Content format
+const mapHistoryToContent = (messages: ChatMessage[]): Content[] => {
+    return messages
+        .filter(m => m.role !== 'system')
+        .map(m => {
+            // Remove internal UI fields if expanding logic later
+            return {
+                role: m.role,
+                parts: [{ text: m.text }]
+            };
+        });
+};
+
+export const initializeChat = () => {
+    getClient();
+};
+
+export const sendMessageToGemini = async (newMessage: string, history: ChatMessage[]) => {
+  const client = getClient();
+  
+  // Create a completely new chat session for every request to ensure statelessness on the server side
+  // but preserving context via the 'history' array passed from the client.
+  // This solves the "Session Isolation" issue.
+  const chatSession = client.chats.create({
+    model: "gemini-2.5-flash",
+    history: mapHistoryToContent(history), 
+    config: {
+      systemInstruction: BASE_PROMPT + "\n" + RAG_SYSTEM_PROMPT,
+      temperature: 0.3, // Lower temperature for more disciplined logic following
+      tools: [{ functionDeclarations: [queryKnowledgeBaseTool] }],
+    },
+  });
+
+  try {
+    let result = await chatSession.sendMessage({ message: newMessage });
+    
+    // Check for function calls
+    const calls = result.functionCalls;
+    
+    if (calls && calls.length > 0) {
+      const call = calls[0];
+      
+      if (call.name === "query_knowledge_base") {
+        console.log("🛠️ Mobinext Searching DB:", call.args);
+        
+        // Execute Search
+        const products = await searchProducts(call.args as FilterParams);
+        
+        // Create context
+        const productContext = products.length > 0 
+            ? JSON.stringify(products.slice(0, 10))
+            : "هیچ محصول دقیقی با این فیلترها پیدا نشد. قانون 70/30 را اجرا کن و محصولات نزدیک را پیشنهاد بده.";
+        
+        // Send tool response
+        result = await chatSession.sendMessage({
+          message: [{
+            functionResponse: {
+              name: call.name,
+              id: call.id,
+              response: { result: productContext }
+            }
+          }]
+        });
+        
+        return {
+          text: result.text,
+          products: products
+        };
+      }
+    }
+
+    return {
+      text: result.text,
+      products: []
+    };
+
+  } catch (error) {
+    console.error("Gemini Error:", error);
+    return {
+      text: "متاسفانه مشکلی در شبکه پیش آمد. لطفا دوباره تلاش کنید.",
+      products: []
+    };
+  }
+};
+
+-------------------------
+.\services\productService.ts:
+
+import { Product, ProductMatch, FilterParams, DATA_URL } from '../types';
+
+let productDatabase: Product[] = [];
+
+// Fetch and cache the database
+export const loadProductDatabase = async (): Promise<void> => {
+  if (productDatabase.length > 0) return;
+  
+  try {
+    const response = await fetch(DATA_URL);
+    if (!response.ok) throw new Error("Failed to load product data");
+    const data = await response.json();
+    
+    // Normalize data structure if needed depending on raw JSON format
+    // Assuming the JSON is an array of objects. We map to our interface.
+    productDatabase = Array.isArray(data) ? data.map((item: any, index: number) => ({
+      id: item.id || index,
+      title: item.title || item.name || "محصول بدون نام",
+      price: parsePrice(item.price),
+      link: item.link || item.url || "#",
+      image: item.image || item.img || null,
+      category: item.category || "لوازم جانبی",
+      features: normalizeFeatures(item.features),
+      description: item.description || ""
+    })) : [];
+    
+    console.log(`Loaded ${productDatabase.length} products.`);
+  } catch (error) {
+    console.error("Error loading knowledge base:", error);
+    productDatabase = []; // Fallback
+  }
+};
+
+// Helper to normalize features which might be strings or objects {label, value}
+const normalizeFeatures = (features: any): string[] => {
+    if (!Array.isArray(features)) return [];
+    return features.map(f => {
+        if (typeof f === 'string') return f;
+        if (f && typeof f === 'object') {
+            if (f.label && f.value) return `${f.label}: ${f.value}`;
+            if (f.value) return String(f.value);
+            return Object.values(f).join(': ');
+        }
+        return String(f);
+    });
+};
+
+// Helper to clean price strings to numbers
+const parsePrice = (priceRaw: string | number): number => {
+  if (typeof priceRaw === 'number') return priceRaw;
+  if (!priceRaw) return 0;
+  // Remove non-digits
+  const numericString = priceRaw.replace(/\D/g, '');
+  return parseInt(numericString, 10) || 0;
+};
+
+// Search Logic implementing the prompt's requirements
+export const searchProducts = async (params: FilterParams): Promise<ProductMatch[]> => {
+  await loadProductDatabase();
+
+  const { category, min_price = 0, max_price = 1000000000, keywords, brand } = params;
+  
+  // 1. Exact Filtering
+  let candidates = productDatabase.filter(p => {
+    // Category Filter (Fuzzy match)
+    if (category && !p.category?.includes(category) && !p.title.includes(category)) {
+      // Check for broad category matches if specific fails
+      return false;
+    }
+    
+    // Price Filter
+    const price = typeof p.price === 'number' ? p.price : parsePrice(p.price);
+    if (price < min_price || price > max_price) return false;
+
+    // Brand Filter
+    if (brand && !p.title.includes(brand)) return false;
+
+    return true;
+  });
+
+  // Keyword scoring
+  // STRICT UPDATE: Excluded 'description' from search scope. 
+  // Only searching Title and Features (which contains size, volume, etc.)
+  if (keywords) {
+    const keywordList = keywords.split(' ').filter(k => k.length > 2);
+    candidates = candidates.map((p: any) => {
+      let score = 0;
+      // ONLY Title and Features are considered. Description is IGNORED.
+      const textSpace = `${p.title} ${p.features?.join(' ')}`.toLowerCase();
+      
+      keywordList.forEach(k => {
+        if (textSpace.includes(k.toLowerCase())) score += 1;
+      });
+      return { ...p, _score: score };
+    }).filter((p: any) => p._score > 0).sort((a: any, b: any) => b._score - a._score);
+  }
+
+  // 2. Logic for "Close Match" (The 70/30 rule from prompt)
+  // If we have very few results (< 3), we relax the price constraint
+  let finalResults: ProductMatch[] = candidates.map(c => ({ ...c }));
+
+  if (finalResults.length < 5) {
+     const priceTolerance = 2000000; // 2 Million Toman tolerance
+     const relaxedMax = max_price + priceTolerance;
+     const relaxedMin = Math.max(0, min_price - priceTolerance);
+
+     const closeMatches = productDatabase.filter(p => {
+        // Exclude already found
+        if (finalResults.find(fr => fr.title === p.title)) return false;
+        
+        // Check Category
+        if (category && !p.category?.includes(category) && !p.title.includes(category)) return false;
+
+        const price = typeof p.price === 'number' ? p.price : parsePrice(p.price);
+        
+        // Relaxed Price Check
+        if (price >= relaxedMin && price <= relaxedMax) {
+           return true;
+        }
+        return false;
+     }).map(p => ({
+        ...p,
+        isCloseMatch: true,
+        matchReason: "قیمت نزدیک به بودجه شما"
+     }));
+
+     // Sort close matches by price difference
+     closeMatches.sort((a, b) => {
+        const priceA = typeof a.price === 'number' ? a.price : parsePrice(a.price);
+        const priceB = typeof b.price === 'number' ? b.price : parsePrice(b.price);
+        // Find distance from target range
+        const distA = priceA > max_price ? priceA - max_price : min_price - priceA;
+        const distB = priceB > max_price ? priceB - max_price : min_price - priceB;
+        return distA - distB;
+     });
+
+     finalResults = [...finalResults, ...closeMatches];
+  }
+
+  // Cap at 10 items
+  return finalResults.slice(0, 10);
+};
+
+-------------------------
