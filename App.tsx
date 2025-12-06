@@ -312,8 +312,8 @@ const App: React.FC = () => {
               <Send size={20} className={isLoading ? 'opacity-0' : 'ml-0.5'} />
             </button>
           </div>
-          <p dir="ltr" className="text-center text-[10px] text-gray-600 mt-3 font-medium flex items-center justify-center gap-1">
-              Created by Reza <span className="text-red-500">❤️</span>
+          <p dir="ltr" className="text-center text-sm font-bold text-gray-400 mt-4 flex items-center justify-center gap-2 animate-pulse hover:text-white transition-all duration-300">
+              Created by Reza <span className="text-red-500 text-lg drop-shadow-lg">❤️</span>
           </p>
         </div>
       </div>
