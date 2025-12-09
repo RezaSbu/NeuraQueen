@@ -32,7 +32,7 @@ const BASE_PROMPT = `
 
 ⛔ **نبایدهای مطلق:**
 - هرگز قبل از دانستن "بودجه" و "نوع محصول" جستجو نکنید (مگر اینکه کاربر بگوید "همه مدل ها را نشان بده").
-- فیلترینگ شما هرگز نباید بر اساس متن توضیحات (Description) باشد. فقط عنوان، ویژگی‌ها، سایز، حجم و قیمت ملاک است.
+- فیلترینگ شما هرگز نباید بر اساس متن توضیحات (Description) یاشد. فقط عنوان، ویژگی‌ها، سایز، حجم و قیمت ملاک است.
 `;
 
 const RAG_SYSTEM_PROMPT = `
@@ -98,6 +98,24 @@ const mapHistoryToContent = (messages: ChatMessage[]): Content[] => {
 
 export const initializeChat = () => {
     getClient();
+};
+
+// New function for Admin Analysis
+export const generateSimpleContent = async (prompt: string): Promise<string> => {
+    const client = getClient();
+    try {
+        const response = await client.models.generateContent({
+            model: "gemini-2.5-flash",
+            contents: prompt,
+            config: {
+                temperature: 0.5,
+            }
+        });
+        return response.text || "خطا در تولید محتوا";
+    } catch (error) {
+        console.error("AI Gen Error:", error);
+        return "خطا در ارتباط با هوش مصنوعی";
+    }
 };
 
 export const sendMessageToGemini = async (newMessage: string, history: ChatMessage[]) => {

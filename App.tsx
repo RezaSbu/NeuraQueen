@@ -7,11 +7,13 @@ import { chatPersistence } from './services/chatPersistence';
 import ChatMessage from './components/ChatMessage';
 import ComparisonModal from './components/ComparisonModal';
 import AuthScreen from './components/AuthScreen';
+import AdminDashboard from './components/AdminDashboard'; // Import Dashboard
 import { ChatMessage as ChatMessageType, Session, ProductMatch, User } from './types';
 
 const App: React.FC = () => {
   // Auth State
   const [currentUser, setCurrentUser] = useState<User | null>(null);
+  const [isAdminLoggedIn, setIsAdminLoggedIn] = useState(false); // Admin State
   const [authChecked, setAuthChecked] = useState(false);
 
   // App State
@@ -210,12 +212,21 @@ const App: React.FC = () => {
       setCurrentUser(user);
       loadUserData(user.user_id);
   };
+  
+  const handleAdminLogout = () => {
+      setIsAdminLoggedIn(false);
+  };
 
   // RENDER LOGIC
   if (!authChecked) return <div className="bg-black h-screen flex items-center justify-center text-primary">Loading...</div>;
 
+  // Render Admin Dashboard
+  if (isAdminLoggedIn) {
+      return <AdminDashboard onLogout={handleAdminLogout} />;
+  }
+
   if (!currentUser) {
-      return <AuthScreen onAuthSuccess={onAuthSuccess} />;
+      return <AuthScreen onAuthSuccess={onAuthSuccess} onAdminLogin={() => setIsAdminLoggedIn(true)} />;
   }
 
   return (

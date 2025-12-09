@@ -1,3 +1,7 @@
+.\.env.local:
+GEMINI_API_KEY=PLACEHOLDER_API_KEY
+
+-------------------------
 .\.gitignore:
 # Logs
 logs
@@ -27,15 +31,22 @@ dist-ssr
 -------------------------
 .\App.tsx:
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { Send, Bike, Sparkles, MessageSquare, Plus, Scale, Trash2, Menu, X } from 'lucide-react';
+import { Send, Bike, Sparkles, MessageSquare, Plus, Scale, Trash2, Menu, X, LogOut, User as UserIcon } from 'lucide-react';
 import { initializeChat, sendMessageToGemini } from './services/geminiService';
 import { loadProductDatabase } from './services/productService';
+import { authService } from './services/authService';
+import { chatPersistence } from './services/chatPersistence';
 import ChatMessage from './components/ChatMessage';
 import ComparisonModal from './components/ComparisonModal';
-import { ChatMessage as ChatMessageType, Session, ProductMatch } from './types';
+import AuthScreen from './components/AuthScreen';
+import { ChatMessage as ChatMessageType, Session, ProductMatch, User } from './types';
 
 const App: React.FC = () => {
-  // State
+  // Auth State
+  const [currentUser, setCurrentUser] = useState<User | null>(null);
+  const [authChecked, setAuthChecked] = useState(false);
+
+  // App State
   const [sessions, setSessions] = useState<Session[]>([]);
   const [currentSessionId, setCurrentSessionId] = useState<string>('');
   const [input, setInput] = useState('');
@@ -46,14 +57,29 @@ const App: React.FC = () => {
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
-  // Initialize
+  // 1. Initialize App & Check Auth
   useEffect(() => {
     loadProductDatabase();
-    initializeChat(); 
+    initializeChat();
     
-    // Create initial session
-    createNewSession();
+    // Check for existing session
+    const storedUser = authService.checkLocalSession();
+    if (storedUser) {
+      setCurrentUser(storedUser);
+      loadUserData(storedUser.user_id);
+    }
+    setAuthChecked(true);
   }, []);
+
+  const loadUserData = async (userId: string) => {
+    const userSessions = await chatPersistence.loadUserSessions(userId);
+    if (userSessions.length > 0) {
+        setSessions(userSessions);
+        setCurrentSessionId(userSessions[0].id);
+    } else {
+        createNewSession(userId, true);
+    }
+  };
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -64,46 +90,74 @@ const App: React.FC = () => {
   }, [sessions, currentSessionId, isLoading]);
 
   // Session Management
-  const createNewSession = () => {
+  const createNewSession = (userId = currentUser?.user_id, isInitial = false) => {
+    if (!userId) return;
+
     const newSession: Session = {
       id: Date.now().toString(),
       title: 'چت جدید',
       messages: [{
         id: 'welcome',
         role: 'model',
-        text: 'سلام! من **Mobinext** هستم 🤖\n\nدستیار هوشمند استار سیکلت. چطور می‌تونم در خرید لوازم موتور کمکتون کنم؟',
+        text: `سلام ${currentUser?.name || 'دوست'} عزیز! 👋\n\nمن **Mobinext** هستم. چطور می‌تونم در خرید لوازم موتور کمکتون کنم؟`,
         timestamp: Date.now()
       }],
       lastModified: Date.now()
     };
-    setSessions(prev => [newSession, ...prev]);
+    
+    // Save to State
+    if (isInitial) {
+        setSessions([newSession]);
+    } else {
+        setSessions(prev => [newSession, ...prev]);
+    }
     setCurrentSessionId(newSession.id);
     setSidebarOpen(false);
+
+    // Persist
+    chatPersistence.saveSession(userId, newSession);
   };
 
   const updateCurrentSession = (newMessages: ChatMessageType[]) => {
-    setSessions(prev => prev.map(s => {
-      if (s.id === currentSessionId) {
-        // Update title based on first user message if it's "New Chat"
-        let title = s.title;
-        if (s.title === 'چت جدید' && newMessages.length > 1) {
-            const firstUserMsg = newMessages.find(m => m.role === 'user');
-            if (firstUserMsg) title = firstUserMsg.text.slice(0, 30) + '...';
-        }
-        return { ...s, messages: newMessages, title, lastModified: Date.now() };
-      }
-      return s;
-    }));
+    setSessions(prev => {
+        const updatedSessions = prev.map(s => {
+          if (s.id === currentSessionId) {
+            let title = s.title;
+            // Update title based on first user message
+            if (s.title === 'چت جدید' && newMessages.length > 1) {
+                const firstUserMsg = newMessages.find(m => m.role === 'user');
+                if (firstUserMsg) title = firstUserMsg.text.slice(0, 30) + '...';
+            }
+            
+            const updatedSession = { ...s, messages: newMessages, title, lastModified: Date.now() };
+            
+            // Persist to DB asynchronously
+            if (currentUser?.user_id) {
+                chatPersistence.saveSession(currentUser.user_id, updatedSession);
+            }
+            
+            return updatedSession;
+          }
+          return s;
+        });
+        return updatedSessions;
+    });
   };
 
-  const deleteSession = (e: React.MouseEvent, id: string) => {
+  const deleteSession = async (e: React.MouseEvent, id: string) => {
     e.stopPropagation();
+    
+    // DB Remove
+    await chatPersistence.deleteSession(id);
+
+    // State Remove
     const newSessions = sessions.filter(s => s.id !== id);
     setSessions(newSessions);
+    
     if (currentSessionId === id && newSessions.length > 0) {
         setCurrentSessionId(newSessions[0].id);
-    } else if (newSessions.length === 0) {
-        createNewSession();
+    } else if (newSessions.length === 0 && currentUser) {
+        createNewSession(currentUser.user_id);
     }
   };
 
@@ -132,8 +186,6 @@ const App: React.FC = () => {
     updateCurrentSession(updatedWithUser);
 
     try {
-      // Send the previous history (currentMsgs) and the new prompt (userText)
-      // This ensures each session maintains its own isolated memory
       const response = await sendMessageToGemini(userText, currentMsgs);
       
       const botMsg: ChatMessageType = {
@@ -158,7 +210,6 @@ const App: React.FC = () => {
     }
   };
 
-  // Comparison Logic - Memoized to prevent re-renders
   const toggleComparison = useCallback((product: ProductMatch) => {
     setComparisonList(prev => {
         const exists = prev.find(p => p.title === product.title);
@@ -180,6 +231,24 @@ const App: React.FC = () => {
       handleSend();
     }
   };
+
+  const handleLogout = () => {
+      authService.logout();
+      setCurrentUser(null);
+      setSessions([]);
+  };
+
+  const onAuthSuccess = (user: User) => {
+      setCurrentUser(user);
+      loadUserData(user.user_id);
+  };
+
+  // RENDER LOGIC
+  if (!authChecked) return <div className="bg-black h-screen flex items-center justify-center text-primary">Loading...</div>;
+
+  if (!currentUser) {
+      return <AuthScreen onAuthSuccess={onAuthSuccess} />;
+  }
 
   return (
     <div className="flex h-screen bg-black text-gray-100 font-sans overflow-hidden" dir="rtl">
@@ -211,7 +280,7 @@ const App: React.FC = () => {
 
         <div className="p-4">
            <button 
-             onClick={createNewSession}
+             onClick={() => createNewSession()}
              className="w-full flex items-center gap-2 bg-primary hover:bg-green-400 text-black font-bold py-3 px-4 rounded-xl transition-all shadow-lg shadow-primary/10 hover:shadow-primary/30"
            >
              <Plus size={20} />
@@ -244,10 +313,23 @@ const App: React.FC = () => {
            ))}
         </div>
         
-        <div className="p-6 border-t border-white/5 text-center">
-            <h1 className="text-2xl font-black bg-gradient-to-r from-primary via-white to-primary bg-clip-text text-transparent animate-pulse-slow tracking-wider drop-shadow-lg">
-                Mobinext
-            </h1>
+        <div className="p-4 border-t border-white/5">
+            <div className="flex items-center gap-3 mb-4 px-2">
+                <div className="w-8 h-8 rounded-full bg-white/10 flex items-center justify-center">
+                    <UserIcon size={16} className="text-primary" />
+                </div>
+                <div className="flex flex-col">
+                    <span className="text-sm font-bold text-white">{currentUser.name} {currentUser.last_name}</span>
+                    <span className="text-xs text-gray-500">{currentUser.username}</span>
+                </div>
+            </div>
+            <button 
+              onClick={handleLogout}
+              className="w-full flex items-center justify-center gap-2 text-red-400 hover:bg-red-500/10 py-2 rounded-lg transition-colors text-sm"
+            >
+                <LogOut size={16} />
+                <span>خروج از حساب</span>
+            </button>
         </div>
       </aside>
 
@@ -340,9 +422,6 @@ const App: React.FC = () => {
               <Send size={20} className={isLoading ? 'opacity-0' : 'ml-0.5'} />
             </button>
           </div>
-          <p dir="ltr" className="text-center text-sm font-bold text-gray-400 mt-4 flex items-center justify-center gap-2 animate-pulse hover:text-white transition-all duration-300">
-              Created by Reza <span className="text-red-500 text-lg drop-shadow-lg">❤️</span>
-          </p>
         </div>
       </div>
 
@@ -422,7 +501,6 @@ with open(output_filename, 'w', encoding='utf-8') as outfile:
 print(f"\nعملیات با موفقیت تمام شد! تمام کدها در فایل '{output_filename}' ذخیره شدند.")
 -------------------------
 .\index.html:
-
 <!DOCTYPE html>
 <html lang="fa" dir="rtl">
   <head>
@@ -466,6 +544,35 @@ print(f"\nعملیات با موفقیت تمام شد! تمام کدها در �
               popIn: {
                 '0%': { opacity: '0', transform: 'scale(0.9)' },
                 '100%': { opacity: '1', transform: 'scale(1)' },
+              }
+            }
+          }
+        }
+      }
+    </script>
+  <script type="importmap">
+{
+  "imports": {
+    "react-dom/": "https://aistudiocdn.com/react-dom@^19.2.1/",
+    "path": "https://aistudiocdn.com/path@^0.12.7",
+    "react/": "https://aistudiocdn.com/react@^19.2.1/",
+    "react": "https://aistudiocdn.com/react@^19.2.1",
+    "url": "https://aistudiocdn.com/url@^0.11.4",
+    "lucide-react": "https://aistudiocdn.com/lucide-react@^0.556.0",
+    "react-markdown": "https://aistudiocdn.com/react-markdown@^10.1.0",
+    "vite": "https://aistudiocdn.com/vite@^7.2.7",
+    "@google/genai": "https://aistudiocdn.com/@google/genai@^1.32.0",
+    "@supabase/supabase-js": "https://aistudiocdn.com/@supabase/supabase-js@^2.87.0"
+  }
+}
+</script>
+<link rel="stylesheet" href="/index.css">
+</head>
+  <body class="bg-black text-gray-100">
+    <div id="root"></div>
+    <script type="module" src="/index.tsx"></script>
+  </body>
+</html>
 -------------------------
 .\index.tsx:
 import React from 'react';
@@ -483,7 +590,6 @@ root.render(
     <App />
   </React.StrictMode>
 );
-
 -------------------------
 .\metadata.json:
 {
@@ -504,20 +610,23 @@ root.render(
     "preview": "vite preview"
   },
   "dependencies": {
-
+    "@google/genai": "^0.2.1",
+    "@supabase/supabase-js": "^2.39.7",
+    "lucide-react": "^0.475.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-markdown": "^9.0.3"
   },
   "devDependencies": {
     "@types/node": "^22.14.0",
-    
+    "@types/react": "^18.3.3",
+    "@types/react-dom": "^18.3.0",
     "typescript": "~5.8.2",
     "vite": "^6.2.0"
   }
 }
-
 -------------------------
 .\README.md:
-
-```markdown
 # StarCycle - Mobinext AI Chatbot
 
 An intelligent conversational AI assistant for StarCycle motorcycle parts store, built with Next.js and powered by artificial intelligence.
@@ -751,9 +860,63 @@ For technical support or questions:
 ---
 
 **Built with ❤️ by Mobinext for StarCycle**
-```
-
-این متن کامل و حرفه‌ای شامل تمام بخش‌های لازم برای یک README عالی است. می‌توانید مستقیماً کپی کرده و استفاده کنید!
+-------------------------
+.\SQL.txt:
+-- 1. ساخت جدول کاربران (users)
+CREATE TABLE IF NOT EXISTS users (
+user_id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+number TEXT UNIQUE NOT NULL,
+username TEXT UNIQUE NOT NULL,
+name TEXT,
+last_name TEXT,
+pass TEXT NOT NULL, -- توجه: در محیط واقعی رمزها باید هش شوند
+signup_Date TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+-- 2. ساخت جدول نشست‌های چت (chat_sessions)
+CREATE TABLE IF NOT EXISTS chat_sessions (
+id TEXT PRIMARY KEY,
+user_id UUID REFERENCES users(user_id) ON DELETE CASCADE,
+title TEXT,
+messages JSONB, -- ذخیره آرایه پیام‌ها به صورت JSON
+last_modified TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+-- ایجاد Index برای جستجوی سریعتر
+CREATE INDEX IF NOT EXISTS idx_chat_sessions_user_id ON chat_sessions(user_id);
+-- Allow everyone to insert
+CREATE POLICY "Enable insert for all" ON public.users
+FOR INSERT
+TO anon
+WITH CHECK (true);
+-- Allow everyone to read
+CREATE POLICY "Enable select for all" ON public.users
+FOR SELECT
+TO anon
+USING (true);
+-- Allow update (برای last_login)
+CREATE POLICY "Enable update for all" ON public.users
+FOR UPDATE
+TO anon
+USING (true)
+WITH CHECK (true);
+-- Allow INSERT on chat_sessions
+CREATE POLICY "Enable insert for all on chat_sessions"
+ON public.chat_sessions
+FOR INSERT
+TO anon
+WITH CHECK (true);
+-- Allow SELECT
+CREATE POLICY "Enable select for all on chat_sessions"
+ON public.chat_sessions
+FOR SELECT
+TO anon
+USING (true);
+-- Allow UPDATE (اختیاری)
+CREATE POLICY "Enable update for all on chat_sessions"
+ON public.chat_sessions
+FOR UPDATE
+TO anon
+USING (true)
+WITH CHECK (true);
 -------------------------
 .\tsconfig.json:
 {
@@ -787,7 +950,6 @@ For technical support or questions:
 }
 -------------------------
 .\types.ts:
-
 export interface Product {
   id?: string | number;
   title: string;
@@ -820,6 +982,15 @@ export interface Session {
   lastModified: number;
 }
 
+export interface User {
+  user_id: string;
+  number: string;
+  username: string;
+  name: string;
+  last_name: string;
+  signup_Date: string;
+}
+
 export interface FilterParams {
   category?: string;
   min_price?: number;
@@ -829,12 +1000,14 @@ export interface FilterParams {
 }
 
 export const DATA_URL = "https://raw.githubusercontent.com/RezaSbu/Database/refs/heads/main/optimized_products_final_updated.json";
-
 -------------------------
 .\vite.config.ts:
 import path from 'path';
 import { defineConfig, loadEnv } from 'vite';
+import { fileURLToPath } from 'url';
 
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 export default defineConfig(({ mode }) => {
     const env = loadEnv(mode, '.', '');
@@ -846,7 +1019,9 @@ export default defineConfig(({ mode }) => {
       plugins: [],
       define: {
         'process.env.API_KEY': JSON.stringify(env.GEMINI_API_KEY),
-        'process.env.GEMINI_API_KEY': JSON.stringify(env.GEMINI_API_KEY)
+        'process.env.GEMINI_API_KEY': JSON.stringify(env.GEMINI_API_KEY),
+        'process.env.SUPABASE_URL': JSON.stringify("https://jhjlxljhijhrvclgsbzc.supabase.co"),
+        'process.env.SUPABASE_KEY': JSON.stringify("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Impoamx4bGpoaWpocnZjbGdzYnpjIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjUyNjQ4NzYsImV4cCI6MjA4MDg0MDg3Nn0.8WwtsrOE3Fch_vFczeu6Fz9A2QiO_Pbwh_MxuhFUFwY")
       },
       resolve: {
         alias: {
@@ -855,10 +1030,9 @@ export default defineConfig(({ mode }) => {
       }
     };
 });
-
 -------------------------
 .\.git\COMMIT_EDITMSG:
-Readme and a liitle not importatnt ui has changed
+Login forn And Database Added
 
 -------------------------
 .\.git\config:
@@ -880,6 +1054,10 @@ Readme and a liitle not importatnt ui has changed
 	vscode-merge-base = origin/main
 	remote = origin
 	merge = refs/heads/V1.1
+[branch "Login"]
+	remote = origin
+	merge = refs/heads/Login
+	vscode-merge-base = origin/main
 
 -------------------------
 .\.git\description:
@@ -892,7 +1070,7 @@ cc0a61c89453efaef6617dcea8ec942d7771c22b		branch 'main' of https://github.com/Re
 
 -------------------------
 .\.git\HEAD:
-ref: refs/heads/main
+ref: refs/heads/Login
 
 -------------------------
 .\.git\ORIG_HEAD:
@@ -1833,12 +2011,22 @@ exit 0
 38816cfd89f9c033a4f52c4722b792a9ced985cb 7ec4c17df8d876639885cee888056ce707dfd69a RezaSbu <Ahmadireza582@gmail.com> 1765034017 +0330	checkout: moving from main to V1.1
 7ec4c17df8d876639885cee888056ce707dfd69a 38816cfd89f9c033a4f52c4722b792a9ced985cb RezaSbu <Ahmadireza582@gmail.com> 1765034028 +0330	checkout: moving from V1.1 to main
 38816cfd89f9c033a4f52c4722b792a9ced985cb cc0a61c89453efaef6617dcea8ec942d7771c22b RezaSbu <Ahmadireza582@gmail.com> 1765034034 +0330	pull: Fast-forward
+cc0a61c89453efaef6617dcea8ec942d7771c22b 1605310c8478227fc1f9450c42af72bcf46eb620 RezaSbu <Ahmadireza582@gmail.com> 1765272840 +0330	commit: Guilde code has changed
+1605310c8478227fc1f9450c42af72bcf46eb620 1605310c8478227fc1f9450c42af72bcf46eb620 RezaSbu <Ahmadireza582@gmail.com> 1765275960 +0330	checkout: moving from main to Login
+1605310c8478227fc1f9450c42af72bcf46eb620 1605310c8478227fc1f9450c42af72bcf46eb620 RezaSbu <Ahmadireza582@gmail.com> 1765275969 +0330	checkout: moving from Login to Login
+1605310c8478227fc1f9450c42af72bcf46eb620 227bd81ff1fe7e3233d433f452dd7ae6559173e7 RezaSbu <Ahmadireza582@gmail.com> 1765278303 +0330	commit: Login forn And Database Added
+
+-------------------------
+.\.git\logs\refs\heads\Login:
+0000000000000000000000000000000000000000 1605310c8478227fc1f9450c42af72bcf46eb620 RezaSbu <Ahmadireza582@gmail.com> 1765275960 +0330	branch: Created from HEAD
+1605310c8478227fc1f9450c42af72bcf46eb620 227bd81ff1fe7e3233d433f452dd7ae6559173e7 RezaSbu <Ahmadireza582@gmail.com> 1765278303 +0330	commit: Login forn And Database Added
 
 -------------------------
 .\.git\logs\refs\heads\main:
 0000000000000000000000000000000000000000 430a1e71314e0b97caa64260716e0cca74a0f76b RezaSbu <Ahmadireza582@gmail.com> 1765031838 +0330	clone: from https://github.com/RezaSbu/NeuraQueen.git
 430a1e71314e0b97caa64260716e0cca74a0f76b 38816cfd89f9c033a4f52c4722b792a9ced985cb RezaSbu <Ahmadireza582@gmail.com> 1765033645 +0330	commit: Base project
 38816cfd89f9c033a4f52c4722b792a9ced985cb cc0a61c89453efaef6617dcea8ec942d7771c22b RezaSbu <Ahmadireza582@gmail.com> 1765034034 +0330	pull: Fast-forward
+cc0a61c89453efaef6617dcea8ec942d7771c22b 1605310c8478227fc1f9450c42af72bcf46eb620 RezaSbu <Ahmadireza582@gmail.com> 1765272840 +0330	commit: Guilde code has changed
 
 -------------------------
 .\.git\logs\refs\heads\V1.1:
@@ -1850,17 +2038,26 @@ exit 0
 0000000000000000000000000000000000000000 430a1e71314e0b97caa64260716e0cca74a0f76b RezaSbu <Ahmadireza582@gmail.com> 1765031838 +0330	clone: from https://github.com/RezaSbu/NeuraQueen.git
 
 -------------------------
+.\.git\logs\refs\remotes\origin\Login:
+0000000000000000000000000000000000000000 227bd81ff1fe7e3233d433f452dd7ae6559173e7 RezaSbu <Ahmadireza582@gmail.com> 1765278349 +0330	update by push
+
+-------------------------
 .\.git\logs\refs\remotes\origin\main:
 430a1e71314e0b97caa64260716e0cca74a0f76b 38816cfd89f9c033a4f52c4722b792a9ced985cb RezaSbu <Ahmadireza582@gmail.com> 1765033651 +0330	update by push
 38816cfd89f9c033a4f52c4722b792a9ced985cb cc0a61c89453efaef6617dcea8ec942d7771c22b RezaSbu <Ahmadireza582@gmail.com> 1765034025 +0330	pull: fast-forward
+cc0a61c89453efaef6617dcea8ec942d7771c22b 1605310c8478227fc1f9450c42af72bcf46eb620 RezaSbu <Ahmadireza582@gmail.com> 1765272845 +0330	update by push
 
 -------------------------
 .\.git\logs\refs\remotes\origin\V1.1:
 0000000000000000000000000000000000000000 7ec4c17df8d876639885cee888056ce707dfd69a RezaSbu <Ahmadireza582@gmail.com> 1765033935 +0330	update by push
 
 -------------------------
+.\.git\refs\heads\Login:
+227bd81ff1fe7e3233d433f452dd7ae6559173e7
+
+-------------------------
 .\.git\refs\heads\main:
-cc0a61c89453efaef6617dcea8ec942d7771c22b
+1605310c8478227fc1f9450c42af72bcf46eb620
 
 -------------------------
 .\.git\refs\heads\V1.1:
@@ -1871,16 +2068,242 @@ cc0a61c89453efaef6617dcea8ec942d7771c22b
 ref: refs/remotes/origin/main
 
 -------------------------
+.\.git\refs\remotes\origin\Login:
+227bd81ff1fe7e3233d433f452dd7ae6559173e7
+
+-------------------------
 .\.git\refs\remotes\origin\main:
-cc0a61c89453efaef6617dcea8ec942d7771c22b
+1605310c8478227fc1f9450c42af72bcf46eb620
 
 -------------------------
 .\.git\refs\remotes\origin\V1.1:
 7ec4c17df8d876639885cee888056ce707dfd69a
 
 -------------------------
-.\components\ChatMessage.tsx:
+.\components\AuthScreen.tsx:
+import React, { useState } from 'react';
+import { User as UserIcon, Lock, Phone, UserPlus, LogIn, ChevronRight } from 'lucide-react';
+import { authService } from '../services/authService';
+import { User } from '../types';
 
+interface Props {
+  onAuthSuccess: (user: User) => void;
+}
+
+const AuthScreen: React.FC<Props> = ({ onAuthSuccess }) => {
+  const [isLogin, setIsLogin] = useState(true);
+  const [isLoading, setIsLoading] = useState(false);
+  const [error, setError] = useState('');
+
+  // Login State
+  const [loginId, setLoginId] = useState('');
+  const [loginPass, setLoginPass] = useState('');
+
+  // Signup State
+  const [signupData, setSignupData] = useState({
+    name: '',
+    last_name: '',
+    username: '',
+    number: '',
+    pass: ''
+  });
+
+  const handleLogin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError('');
+    setIsLoading(true);
+    
+    const result = await authService.login(loginId, loginPass);
+    if (result.success && result.user) {
+      onAuthSuccess(result.user);
+    } else {
+      setError(result.error || 'خطا در ورود');
+    }
+    setIsLoading(false);
+  };
+
+  const handleSignup = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError('');
+    
+    if (!signupData.number || !signupData.username || !signupData.pass) {
+        setError("لطفا فیلدهای اجباری را پر کنید");
+        return;
+    }
+
+    setIsLoading(true);
+    const result = await authService.signup(signupData);
+    if (result.success && result.user) {
+      onAuthSuccess(result.user);
+    } else {
+      setError(result.error || 'خطا در ثبت نام');
+    }
+    setIsLoading(false);
+  };
+
+  return (
+    <div className="min-h-screen bg-black flex items-center justify-center p-4 relative overflow-hidden">
+      {/* Background Elements */}
+      <div className="absolute top-[-10%] left-[-10%] w-[40%] h-[40%] bg-primary/20 rounded-full blur-[120px] pointer-events-none"></div>
+      <div className="absolute bottom-[-10%] right-[-10%] w-[30%] h-[30%] bg-blue-500/10 rounded-full blur-[100px] pointer-events-none"></div>
+
+      <div className="w-full max-w-md bg-[#121212] border border-white/10 rounded-3xl shadow-2xl overflow-hidden relative z-10">
+        
+        {/* Header Toggle */}
+        <div className="flex p-2 bg-[#1E1E1E]">
+           <button 
+             onClick={() => { setIsLogin(true); setError(''); }}
+             className={`flex-1 py-3 rounded-xl font-bold text-sm transition-all duration-300 ${isLogin ? 'bg-primary text-black shadow-lg shadow-primary/20' : 'text-gray-500 hover:text-gray-300'}`}
+           >
+             ورود به حساب
+           </button>
+           <button 
+             onClick={() => { setIsLogin(false); setError(''); }}
+             className={`flex-1 py-3 rounded-xl font-bold text-sm transition-all duration-300 ${!isLogin ? 'bg-white text-black shadow-lg' : 'text-gray-500 hover:text-gray-300'}`}
+           >
+             ثبت نام رایگان
+           </button>
+        </div>
+
+        <div className="p-8">
+           <div className="text-center mb-8">
+             <h2 className="text-2xl font-black text-white mb-2">
+               {isLogin ? 'خوش آمدید! 👋' : 'ساخت حساب کاربری 🚀'}
+             </h2>
+             <p className="text-gray-400 text-sm">
+               {isLogin ? 'برای استفاده از دستیار هوشمند وارد شوید' : 'به خانواده استار سیکلت بپیوندید'}
+             </p>
+           </div>
+
+           {error && (
+             <div className="mb-6 p-3 bg-red-500/10 border border-red-500/30 rounded-xl text-red-400 text-xs text-center animate-fadeIn">
+               {error}
+             </div>
+           )}
+
+           {isLogin ? (
+             // Login Form
+             <form onSubmit={handleLogin} className="space-y-4">
+                <div className="space-y-1">
+                    <label className="text-xs text-gray-400 mr-1">نام کاربری یا شماره موبایل</label>
+                    <div className="relative">
+                        <UserIcon size={18} className="absolute right-3 top-3.5 text-gray-500" />
+                        <input 
+                          type="text" 
+                          value={loginId}
+                          onChange={(e) => setLoginId(e.target.value)}
+                          className="w-full bg-[#1E1E1E] border border-white/10 focus:border-primary/50 text-white rounded-xl py-3 pr-10 pl-4 outline-none transition-all placeholder-gray-600"
+                          placeholder="مثلا: 0912..."
+                        />
+                    </div>
+                </div>
+
+                <div className="space-y-1">
+                    <label className="text-xs text-gray-400 mr-1">رمز عبور</label>
+                    <div className="relative">
+                        <Lock size={18} className="absolute right-3 top-3.5 text-gray-500" />
+                        <input 
+                          type="password" 
+                          value={loginPass}
+                          onChange={(e) => setLoginPass(e.target.value)}
+                          className="w-full bg-[#1E1E1E] border border-white/10 focus:border-primary/50 text-white rounded-xl py-3 pr-10 pl-4 outline-none transition-all placeholder-gray-600"
+                          placeholder="••••••••"
+                        />
+                    </div>
+                </div>
+
+                <button 
+                  type="submit" 
+                  disabled={isLoading}
+                  className="w-full bg-primary hover:bg-green-400 text-black font-bold py-3.5 rounded-xl transition-all shadow-lg shadow-primary/20 hover:shadow-primary/40 flex items-center justify-center gap-2 mt-4"
+                >
+                  {isLoading ? 'در حال بررسی...' : (
+                    <>
+                      <span>ورود به سیستم</span>
+                      <LogIn size={18} />
+                    </>
+                  )}
+                </button>
+             </form>
+           ) : (
+             // Signup Form
+             <form onSubmit={handleSignup} className="space-y-3">
+                <div className="grid grid-cols-2 gap-3">
+                   <input 
+                     type="text" 
+                     value={signupData.name}
+                     onChange={(e) => setSignupData({...signupData, name: e.target.value})}
+                     className="bg-[#1E1E1E] border border-white/10 focus:border-white/30 text-white rounded-xl py-3 px-4 outline-none transition-all placeholder-gray-600 text-sm"
+                     placeholder="نام"
+                   />
+                   <input 
+                     type="text" 
+                     value={signupData.last_name}
+                     onChange={(e) => setSignupData({...signupData, last_name: e.target.value})}
+                     className="bg-[#1E1E1E] border border-white/10 focus:border-white/30 text-white rounded-xl py-3 px-4 outline-none transition-all placeholder-gray-600 text-sm"
+                     placeholder="نام خانوادگی"
+                   />
+                </div>
+
+                <div className="relative">
+                    <UserIcon size={18} className="absolute right-3 top-3.5 text-gray-500" />
+                    <input 
+                      type="text"
+                      value={signupData.username}
+                      onChange={(e) => setSignupData({...signupData, username: e.target.value})} 
+                      className="w-full bg-[#1E1E1E] border border-white/10 focus:border-primary/50 text-white rounded-xl py-3 pr-10 pl-4 outline-none transition-all placeholder-gray-600 text-sm"
+                      placeholder="نام کاربری (انگلیسی)"
+                      dir="ltr"
+                    />
+                </div>
+
+                <div className="relative">
+                    <Phone size={18} className="absolute right-3 top-3.5 text-gray-500" />
+                    <input 
+                      type="tel"
+                      value={signupData.number}
+                      onChange={(e) => setSignupData({...signupData, number: e.target.value})} 
+                      className="w-full bg-[#1E1E1E] border border-white/10 focus:border-primary/50 text-white rounded-xl py-3 pr-10 pl-4 outline-none transition-all placeholder-gray-600 text-sm"
+                      placeholder="شماره موبایل"
+                      dir="ltr"
+                    />
+                </div>
+
+                <div className="relative">
+                    <Lock size={18} className="absolute right-3 top-3.5 text-gray-500" />
+                    <input 
+                      type="password"
+                      value={signupData.pass}
+                      onChange={(e) => setSignupData({...signupData, pass: e.target.value})} 
+                      className="w-full bg-[#1E1E1E] border border-white/10 focus:border-primary/50 text-white rounded-xl py-3 pr-10 pl-4 outline-none transition-all placeholder-gray-600 text-sm"
+                      placeholder="رمز عبور"
+                      dir="ltr"
+                    />
+                </div>
+
+                <button 
+                  type="submit"
+                  disabled={isLoading} 
+                  className="w-full bg-white hover:bg-gray-200 text-black font-bold py-3.5 rounded-xl transition-all shadow-lg flex items-center justify-center gap-2 mt-2"
+                >
+                  {isLoading ? 'در حال ثبت...' : (
+                    <>
+                      <span>ثبت نام و ورود</span>
+                      <UserPlus size={18} />
+                    </>
+                  )}
+                </button>
+             </form>
+           )}
+        </div>
+      </div>
+    </div>
+  );
+};
+
+export default AuthScreen;
+-------------------------
+.\components\ChatMessage.tsx:
 import React, { useState, useEffect, memo } from 'react';
 import { ChatMessage as ChatMessageType, ProductMatch } from '../types';
 import ProductCard from './ProductCard';
@@ -2001,10 +2424,8 @@ const ChatMessage: React.FC<Props> = ({ message, isLastMessage, onCompare, compa
 };
 
 export default memo(ChatMessage);
-
 -------------------------
 .\components\ComparisonModal.tsx:
-
 import React from 'react';
 import { ProductMatch } from '../types';
 import { X, ExternalLink } from 'lucide-react';
@@ -2103,10 +2524,8 @@ const ComparisonModal: React.FC<Props> = ({ products, onClose }) => {
 };
 
 export default ComparisonModal;
-
 -------------------------
 .\components\ProductCard.tsx:
-
 import React from 'react';
 import { ProductMatch } from '../types';
 import { ShoppingCart, ExternalLink, Sparkles, Scale } from 'lucide-react';
@@ -2231,10 +2650,8 @@ const ProductCard: React.FC<Props> = ({ product, index, onCompare, isSelectedFor
 };
 
 export default ProductCard;
-
 -------------------------
 .\components\Typewriter.tsx:
-
 import React, { useState, useEffect, useRef } from 'react';
 import ReactMarkdown from 'react-markdown';
 
@@ -2292,10 +2709,197 @@ const Typewriter: React.FC<Props> = ({ text, onComplete, speed = 10 }) => {
 };
 
 export default Typewriter;
+-------------------------
+.\services\authService.ts:
+import { supabase } from './supabaseClient';
+import { User } from '../types';
 
+const SESSION_KEY = 'mobinext_user_session';
+const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
+
+interface AuthResult {
+  success: boolean;
+  user?: User;
+  error?: string;
+}
+
+const mapUser = (data: any): User => ({
+    user_id: data.user_id,
+    number: data.number,
+    username: data.username,
+    name: data.name,
+    last_name: data.last_name,
+    signup_Date: data.signup_date || data.signup_Date || new Date().toISOString()
+});
+
+export const authService = {
+  // Sign Up
+  async signup(data: { number: string; username: string; name: string; last_name: string; pass: string }): Promise<AuthResult> {
+    try {
+      // Check for existing user using maybeSingle to avoid 0-row errors
+      const { data: existingUser, error: checkError } = await supabase
+        .from('users')
+        .select('user_id')
+        .or(`number.eq.${data.number},username.eq.${data.username}`)
+        .maybeSingle();
+
+      if (checkError) {
+         // If it's a connection error or something serious, throw it
+         throw checkError;
+      }
+
+      if (existingUser) {
+        return { success: false, error: 'این شماره موبایل یا نام کاربری قبلا ثبت شده است.' };
+      }
+
+      const { data: newUserRaw, error } = await supabase
+        .from('users')
+        .insert([{
+            number: data.number,
+            username: data.username,
+            name: data.name,
+            last_name: data.last_name,
+            pass: data.pass
+        }])
+        .select()
+        .single();
+
+      if (error) throw error;
+      
+      const newUser = mapUser(newUserRaw);
+      this.saveLocalSession(newUser);
+      return { success: true, user: newUser };
+
+    } catch (error: any) {
+      console.error('Signup error:', error);
+      const msg = error?.message || error?.details || 'خطا در ثبت نام';
+      return { success: false, error: typeof msg === 'string' ? msg : JSON.stringify(msg) };
+    }
+  },
+
+  // Login
+  async login(identifier: string, pass: string): Promise<AuthResult> {
+    try {
+      // Check if identifier is number or username
+      const { data: userRaw, error } = await supabase
+        .from('users')
+        .select('*')
+        .or(`number.eq.${identifier},username.eq.${identifier}`)
+        .eq('pass', pass)
+        .maybeSingle();
+
+      if (error) throw error;
+
+      if (!userRaw) {
+        return { success: false, error: 'نام کاربری/شماره یا رمز عبور اشتباه است.' };
+      }
+      
+      const user = mapUser(userRaw);
+      this.saveLocalSession(user);
+      return { success: true, user };
+
+    } catch (error: any) {
+      console.error('Login error:', error);
+      const msg = error?.message || 'خطا در برقراری ارتباط با سرور';
+      return { success: false, error: msg };
+    }
+  },
+
+  // Local Storage Management (7 Days Rule)
+  saveLocalSession(user: User) {
+    const sessionData = {
+      user,
+      expiry: Date.now() + SEVEN_DAYS_MS
+    };
+    localStorage.setItem(SESSION_KEY, JSON.stringify(sessionData));
+  },
+
+  checkLocalSession(): User | null {
+    const sessionStr = localStorage.getItem(SESSION_KEY);
+    if (!sessionStr) return null;
+
+    try {
+      const session = JSON.parse(sessionStr);
+      if (Date.now() > session.expiry) {
+        localStorage.removeItem(SESSION_KEY);
+        return null;
+      }
+      return session.user;
+    } catch {
+      return null;
+    }
+  },
+
+  logout() {
+    localStorage.removeItem(SESSION_KEY);
+  }
+};
+-------------------------
+.\services\chatPersistence.ts:
+import { supabase } from './supabaseClient';
+import { Session, ChatMessage } from '../types';
+
+export const chatPersistence = {
+  // Load all sessions for a user
+  async loadUserSessions(userId: string): Promise<Session[]> {
+    try {
+      const { data, error } = await supabase
+        .from('chat_sessions')
+        .select('*')
+        .eq('user_id', userId)
+        .order('last_modified', { ascending: false });
+
+      if (error) {
+        console.error('Error loading sessions:', error);
+        return [];
+      }
+
+      return data.map((item: any) => ({
+        id: item.id,
+        title: item.title,
+        messages: item.messages,
+        lastModified: new Date(item.last_modified).getTime()
+      }));
+
+    } catch (e) {
+      console.error(e);
+      return [];
+    }
+  },
+
+  // Save or Update a session
+  async saveSession(userId: string, session: Session) {
+    try {
+      const { error } = await supabase
+        .from('chat_sessions')
+        .upsert({
+          id: session.id,
+          user_id: userId,
+          title: session.title,
+          messages: session.messages,
+          last_modified: new Date(session.lastModified).toISOString()
+        }, { onConflict: 'id' });
+
+      if (error) console.error('Error saving session:', error);
+    } catch (e) {
+      console.error(e);
+    }
+  },
+
+  // Delete a session
+  async deleteSession(sessionId: string) {
+    try {
+      await supabase
+        .from('chat_sessions')
+        .delete()
+        .eq('id', sessionId);
+    } catch (e) {
+      console.error(e);
+    }
+  }
+};
 -------------------------
 .\services\geminiService.ts:
-
 import { GoogleGenAI, FunctionDeclaration, Type, Content } from "@google/genai";
 import { searchProducts } from "./productService";
 import { FilterParams, ChatMessage } from "../types";
@@ -2465,10 +3069,8 @@ export const sendMessageToGemini = async (newMessage: string, history: ChatMessa
     };
   }
 };
-
 -------------------------
 .\services\productService.ts:
-
 import { Product, ProductMatch, FilterParams, DATA_URL } from '../types';
 
 let productDatabase: Product[] = [];
@@ -2611,5 +3213,12 @@ export const searchProducts = async (params: FilterParams): Promise<ProductMatch
   // Cap at 10 items
   return finalResults.slice(0, 10);
 };
+-------------------------
+.\services\supabaseClient.ts:
+import { createClient } from '@supabase/supabase-js';
 
+const supabaseUrl = "https://jhjlxljhijhrvclgsbzc.supabase.co";
+const supabaseKey = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Impoamx4bGpoaWpocnZjbGdzYnpjIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjUyNjQ4NzYsImV4cCI6MjA4MDg0MDg3Nn0.8WwtsrOE3Fch_vFczeu6Fz9A2QiO_Pbwh_MxuhFUFwY";
+
+export const supabase = createClient(supabaseUrl, supabaseKey);
 -------------------------
