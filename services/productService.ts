@@ -1,4 +1,3 @@
-
 import { Product, ProductMatch, FilterParams, DATA_URL } from '../types';
 
 let productDatabase: Product[] = [];
