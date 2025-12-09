@@ -224,15 +224,7 @@ npm start
 
 This project is proprietary and developed exclusively for StarCycle by Mobinext.
 
-## 📞 Support
 
-For technical support or questions:
-- **Development Team**: Mobinext
-- **Client**: StarCycle Motorcycle Parts Store
-
----
-
-**Built with ❤️ by Mobinext for StarCycle**
 ```
 
 این متن کامل و حرفه‌ای شامل تمام بخش‌های لازم برای یک README عالی است. می‌توانید مستقیماً کپی کرده و استفاده کنید!
