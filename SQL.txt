@@ -1,0 +1,55 @@
+-- 1. ساخت جدول کاربران (users)
+CREATE TABLE IF NOT EXISTS users (
+user_id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+number TEXT UNIQUE NOT NULL,
+username TEXT UNIQUE NOT NULL,
+name TEXT,
+last_name TEXT,
+pass TEXT NOT NULL, -- توجه: در محیط واقعی رمزها باید هش شوند
+signup_Date TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+-- 2. ساخت جدول نشست‌های چت (chat_sessions)
+CREATE TABLE IF NOT EXISTS chat_sessions (
+id TEXT PRIMARY KEY,
+user_id UUID REFERENCES users(user_id) ON DELETE CASCADE,
+title TEXT,
+messages JSONB, -- ذخیره آرایه پیام‌ها به صورت JSON
+last_modified TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+-- ایجاد Index برای جستجوی سریعتر
+CREATE INDEX IF NOT EXISTS idx_chat_sessions_user_id ON chat_sessions(user_id);
+-- Allow everyone to insert
+CREATE POLICY "Enable insert for all" ON public.users
+FOR INSERT
+TO anon
+WITH CHECK (true);
+-- Allow everyone to read
+CREATE POLICY "Enable select for all" ON public.users
+FOR SELECT
+TO anon
+USING (true);
+-- Allow update (برای last_login)
+CREATE POLICY "Enable update for all" ON public.users
+FOR UPDATE
+TO anon
+USING (true)
+WITH CHECK (true);
+-- Allow INSERT on chat_sessions
+CREATE POLICY "Enable insert for all on chat_sessions"
+ON public.chat_sessions
+FOR INSERT
+TO anon
+WITH CHECK (true);
+-- Allow SELECT
+CREATE POLICY "Enable select for all on chat_sessions"
+ON public.chat_sessions
+FOR SELECT
+TO anon
+USING (true);
+-- Allow UPDATE (اختیاری)
+CREATE POLICY "Enable update for all on chat_sessions"
+ON public.chat_sessions
+FOR UPDATE
+TO anon
+USING (true)
+WITH CHECK (true);

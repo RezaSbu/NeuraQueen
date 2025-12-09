@@ -1,13 +1,20 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { Send, Bike, Sparkles, MessageSquare, Plus, Scale, Trash2, Menu, X } from 'lucide-react';
+import { Send, Bike, Sparkles, MessageSquare, Plus, Scale, Trash2, Menu, X, LogOut, User as UserIcon } from 'lucide-react';
 import { initializeChat, sendMessageToGemini } from './services/geminiService';
 import { loadProductDatabase } from './services/productService';
+import { authService } from './services/authService';
+import { chatPersistence } from './services/chatPersistence';
 import ChatMessage from './components/ChatMessage';
 import ComparisonModal from './components/ComparisonModal';
-import { ChatMessage as ChatMessageType, Session, ProductMatch } from './types';
+import AuthScreen from './components/AuthScreen';
+import { ChatMessage as ChatMessageType, Session, ProductMatch, User } from './types';
 
 const App: React.FC = () => {
-  // State
+  // Auth State
+  const [currentUser, setCurrentUser] = useState<User | null>(null);
+  const [authChecked, setAuthChecked] = useState(false);
+
+  // App State
   const [sessions, setSessions] = useState<Session[]>([]);
   const [currentSessionId, setCurrentSessionId] = useState<string>('');
   const [input, setInput] = useState('');
@@ -18,14 +25,29 @@ const App: React.FC = () => {
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
-  // Initialize
+  // 1. Initialize App & Check Auth
   useEffect(() => {
     loadProductDatabase();
-    initializeChat(); 
+    initializeChat();
     
-    // Create initial session
-    createNewSession();
+    // Check for existing session
+    const storedUser = authService.checkLocalSession();
+    if (storedUser) {
+      setCurrentUser(storedUser);
+      loadUserData(storedUser.user_id);
+    }
+    setAuthChecked(true);
   }, []);
+
+  const loadUserData = async (userId: string) => {
+    const userSessions = await chatPersistence.loadUserSessions(userId);
+    if (userSessions.length > 0) {
+        setSessions(userSessions);
+        setCurrentSessionId(userSessions[0].id);
+    } else {
+        createNewSession(userId, true);
+    }
+  };
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -36,46 +58,74 @@ const App: React.FC = () => {
   }, [sessions, currentSessionId, isLoading]);
 
   // Session Management
-  const createNewSession = () => {
+  const createNewSession = (userId = currentUser?.user_id, isInitial = false) => {
+    if (!userId) return;
+
     const newSession: Session = {
       id: Date.now().toString(),
       title: 'چت جدید',
       messages: [{
         id: 'welcome',
         role: 'model',
-        text: 'سلام! من **Mobinext** هستم 🤖\n\nدستیار هوشمند استار سیکلت. چطور می‌تونم در خرید لوازم موتور کمکتون کنم؟',
+        text: `سلام ${currentUser?.name || 'دوست'} عزیز! 👋\n\nمن **Mobinext** هستم. چطور می‌تونم در خرید لوازم موتور کمکتون کنم؟`,
         timestamp: Date.now()
       }],
       lastModified: Date.now()
     };
-    setSessions(prev => [newSession, ...prev]);
+    
+    // Save to State
+    if (isInitial) {
+        setSessions([newSession]);
+    } else {
+        setSessions(prev => [newSession, ...prev]);
+    }
     setCurrentSessionId(newSession.id);
     setSidebarOpen(false);
+
+    // Persist
+    chatPersistence.saveSession(userId, newSession);
   };
 
   const updateCurrentSession = (newMessages: ChatMessageType[]) => {
-    setSessions(prev => prev.map(s => {
-      if (s.id === currentSessionId) {
-        // Update title based on first user message if it's "New Chat"
-        let title = s.title;
-        if (s.title === 'چت جدید' && newMessages.length > 1) {
-            const firstUserMsg = newMessages.find(m => m.role === 'user');
-            if (firstUserMsg) title = firstUserMsg.text.slice(0, 30) + '...';
-        }
-        return { ...s, messages: newMessages, title, lastModified: Date.now() };
-      }
-      return s;
-    }));
+    setSessions(prev => {
+        const updatedSessions = prev.map(s => {
+          if (s.id === currentSessionId) {
+            let title = s.title;
+            // Update title based on first user message
+            if (s.title === 'چت جدید' && newMessages.length > 1) {
+                const firstUserMsg = newMessages.find(m => m.role === 'user');
+                if (firstUserMsg) title = firstUserMsg.text.slice(0, 30) + '...';
+            }
+            
+            const updatedSession = { ...s, messages: newMessages, title, lastModified: Date.now() };
+            
+            // Persist to DB asynchronously
+            if (currentUser?.user_id) {
+                chatPersistence.saveSession(currentUser.user_id, updatedSession);
+            }
+            
+            return updatedSession;
+          }
+          return s;
+        });
+        return updatedSessions;
+    });
   };
 
-  const deleteSession = (e: React.MouseEvent, id: string) => {
+  const deleteSession = async (e: React.MouseEvent, id: string) => {
     e.stopPropagation();
+    
+    // DB Remove
+    await chatPersistence.deleteSession(id);
+
+    // State Remove
     const newSessions = sessions.filter(s => s.id !== id);
     setSessions(newSessions);
+    
     if (currentSessionId === id && newSessions.length > 0) {
         setCurrentSessionId(newSessions[0].id);
-    } else if (newSessions.length === 0) {
-        createNewSession();
+    } else if (newSessions.length === 0 && currentUser) {
+        createNewSession(currentUser.user_id);
     }
   };
 
@@ -104,8 +154,6 @@ const App: React.FC = () => {
     updateCurrentSession(updatedWithUser);
 
     try {
-      // Send the previous history (currentMsgs) and the new prompt (userText)
-      // This ensures each session maintains its own isolated memory
       const response = await sendMessageToGemini(userText, currentMsgs);
       
       const botMsg: ChatMessageType = {
@@ -130,7 +178,6 @@ const App: React.FC = () => {
     }
   };
 
-  // Comparison Logic - Memoized to prevent re-renders
   const toggleComparison = useCallback((product: ProductMatch) => {
     setComparisonList(prev => {
         const exists = prev.find(p => p.title === product.title);
@@ -152,6 +199,24 @@ const App: React.FC = () => {
       handleSend();
     }
   };
+
+  const handleLogout = () => {
+      authService.logout();
+      setCurrentUser(null);
+      setSessions([]);
+  };
+
+  const onAuthSuccess = (user: User) => {
+      setCurrentUser(user);
+      loadUserData(user.user_id);
+  };
+
+  // RENDER LOGIC
+  if (!authChecked) return <div className="bg-black h-screen flex items-center justify-center text-primary">Loading...</div>;
+
+  if (!currentUser) {
+      return <AuthScreen onAuthSuccess={onAuthSuccess} />;
+  }
 
   return (
     <div className="flex h-screen bg-black text-gray-100 font-sans overflow-hidden" dir="rtl">
@@ -183,7 +248,7 @@ const App: React.FC = () => {
 
         <div className="p-4">
            <button 
-             onClick={createNewSession}
+             onClick={() => createNewSession()}
              className="w-full flex items-center gap-2 bg-primary hover:bg-green-400 text-black font-bold py-3 px-4 rounded-xl transition-all shadow-lg shadow-primary/10 hover:shadow-primary/30"
            >
              <Plus size={20} />
@@ -216,10 +281,23 @@ const App: React.FC = () => {
            ))}
         </div>
         
-        <div className="p-6 border-t border-white/5 text-center">
-            <h1 className="text-2xl font-black bg-gradient-to-r from-primary via-white to-primary bg-clip-text text-transparent animate-pulse-slow tracking-wider drop-shadow-lg">
-                Mobinext
-            </h1>
+        <div className="p-4 border-t border-white/5">
+            <div className="flex items-center gap-3 mb-4 px-2">
+                <div className="w-8 h-8 rounded-full bg-white/10 flex items-center justify-center">
+                    <UserIcon size={16} className="text-primary" />
+                </div>
+                <div className="flex flex-col">
+                    <span className="text-sm font-bold text-white">{currentUser.name} {currentUser.last_name}</span>
+                    <span className="text-xs text-gray-500">{currentUser.username}</span>
+                </div>
+            </div>
+            <button 
+              onClick={handleLogout}
+              className="w-full flex items-center justify-center gap-2 text-red-400 hover:bg-red-500/10 py-2 rounded-lg transition-colors text-sm"
+            >
+                <LogOut size={16} />
+                <span>خروج از حساب</span>
+            </button>
         </div>
       </aside>
 
@@ -312,9 +390,6 @@ const App: React.FC = () => {
               <Send size={20} className={isLoading ? 'opacity-0' : 'ml-0.5'} />
             </button>
           </div>
-          <p dir="ltr" className="text-center text-sm font-bold text-gray-400 mt-4 flex items-center justify-center gap-2 animate-pulse hover:text-white transition-all duration-300">
-              Created by Reza <span className="text-red-500 text-lg drop-shadow-lg">❤️</span>
-          </p>
         </div>
       </div>
 

@@ -1,4 +1,3 @@
-
 import { GoogleGenAI, FunctionDeclaration, Type, Content } from "@google/genai";
 import { searchProducts } from "./productService";
 import { FilterParams, ChatMessage } from "../types";
