@@ -1,4 +1,3 @@
-
 export interface Product {
   id?: string | number;
   title: string;
@@ -29,6 +28,15 @@ export interface Session {
   title: string;
   messages: ChatMessage[];
   lastModified: number;
+}
+
+export interface User {
+  user_id: string;
+  number: string;
+  username: string;
+  name: string;
+  last_name: string;
+  signup_Date: string;
 }
 
 export interface FilterParams {

@@ -1,4 +1,3 @@
-
 import React, { useState, useEffect, memo } from 'react';
 import { ChatMessage as ChatMessageType, ProductMatch } from '../types';
 import ProductCard from './ProductCard';

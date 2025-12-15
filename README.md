@@ -1,5 +1,3 @@
-
-```markdown
 # StarCycle - Mobinext AI Chatbot
 
 An intelligent conversational AI assistant for StarCycle motorcycle parts store, built with Next.js and powered by artificial intelligence.
@@ -225,6 +223,22 @@ npm start
 This project is proprietary and developed exclusively for StarCycle by Mobinext.
 
 
-```
+## 📞 Support & Contact
 
-این متن کامل و حرفه‌ای شامل تمام بخش‌های لازم برای یک README عالی است. می‌توانید مستقیماً کپی کرده و استفاده کنید!
+For technical support or inquiries, please contact:
+
+- **Development Team**: Mobinext  
+- **Client**: StarCycle Motorcycle Parts Store
+
+---
+
+## 🛠️ Project Information
+
+This project was developed and maintained by **Mobinext** for **StarCycle**, focusing on performance, scalability, and clean architecture.
+
+---
+
+## ❤️ Credits
+
+**Built with care by Mobinext for StarCycle**
+

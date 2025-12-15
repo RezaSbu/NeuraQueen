@@ -1,4 +1,3 @@
-
 import React from 'react';
 import { ProductMatch } from '../types';
 import { X, ExternalLink } from 'lucide-react';

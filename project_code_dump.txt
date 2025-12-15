@@ -1,3 +1,7 @@
+.\.env.local:
+GEMINI_API_KEY=PLACEHOLDER_API_KEY
+
+-------------------------
 .\.gitignore:
 # Logs
 logs
@@ -27,15 +31,24 @@ dist-ssr
 -------------------------
 .\App.tsx:
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { Send, Bike, Sparkles, MessageSquare, Plus, Scale, Trash2, Menu, X } from 'lucide-react';
+import { Send, Bike, Sparkles, MessageSquare, Plus, Scale, Trash2, Menu, X, LogOut, User as UserIcon } from 'lucide-react';
 import { initializeChat, sendMessageToGemini } from './services/geminiService';
 import { loadProductDatabase } from './services/productService';
+import { authService } from './services/authService';
+import { chatPersistence } from './services/chatPersistence';
 import ChatMessage from './components/ChatMessage';
 import ComparisonModal from './components/ComparisonModal';
-import { ChatMessage as ChatMessageType, Session, ProductMatch } from './types';
+import AuthScreen from './components/AuthScreen';
+import AdminDashboard from './components/AdminDashboard'; // Import Dashboard
+import { ChatMessage as ChatMessageType, Session, ProductMatch, User } from './types';
 
 const App: React.FC = () => {
-  // State
+  // Auth State
+  const [currentUser, setCurrentUser] = useState<User | null>(null);
+  const [isAdminLoggedIn, setIsAdminLoggedIn] = useState(false); // Admin State
+  const [authChecked, setAuthChecked] = useState(false);
+
+  // App State
   const [sessions, setSessions] = useState<Session[]>([]);
   const [currentSessionId, setCurrentSessionId] = useState<string>('');
   const [input, setInput] = useState('');
@@ -46,14 +59,29 @@ const App: React.FC = () => {
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
-  // Initialize
+  // 1. Initialize App & Check Auth
   useEffect(() => {
     loadProductDatabase();
-    initializeChat(); 
+    initializeChat();
     
-    // Create initial session
-    createNewSession();
+    // Check for existing session
+    const storedUser = authService.checkLocalSession();
+    if (storedUser) {
+      setCurrentUser(storedUser);
+      loadUserData(storedUser.user_id);
+    }
+    setAuthChecked(true);
   }, []);
+
+  const loadUserData = async (userId: string) => {
+    const userSessions = await chatPersistence.loadUserSessions(userId);
+    if (userSessions.length > 0) {
+        setSessions(userSessions);
+        setCurrentSessionId(userSessions[0].id);
+    } else {
+        createNewSession(userId, true);
+    }
+  };
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -64,46 +92,74 @@ const App: React.FC = () => {
   }, [sessions, currentSessionId, isLoading]);
 
   // Session Management
-  const createNewSession = () => {
+  const createNewSession = (userId = currentUser?.user_id, isInitial = false) => {
+    if (!userId) return;
+
     const newSession: Session = {
       id: Date.now().toString(),
       title: 'چت جدید',
       messages: [{
         id: 'welcome',
         role: 'model',
-        text: 'سلام! من **Mobinext** هستم 🤖\n\nدستیار هوشمند استار سیکلت. چطور می‌تونم در خرید لوازم موتور کمکتون کنم؟',
+        text: `سلام ${currentUser?.name || 'دوست'} عزیز! 👋\n\nمن **Mobinext** هستم. چطور می‌تونم در خرید لوازم موتور کمکتون کنم؟`,
         timestamp: Date.now()
       }],
       lastModified: Date.now()
     };
-    setSessions(prev => [newSession, ...prev]);
+    
+    // Save to State
+    if (isInitial) {
+        setSessions([newSession]);
+    } else {
+        setSessions(prev => [newSession, ...prev]);
+    }
     setCurrentSessionId(newSession.id);
     setSidebarOpen(false);
+
+    // Persist
+    chatPersistence.saveSession(userId, newSession);
   };
 
   const updateCurrentSession = (newMessages: ChatMessageType[]) => {
-    setSessions(prev => prev.map(s => {
-      if (s.id === currentSessionId) {
-        // Update title based on first user message if it's "New Chat"
-        let title = s.title;
-        if (s.title === 'چت جدید' && newMessages.length > 1) {
-            const firstUserMsg = newMessages.find(m => m.role === 'user');
-            if (firstUserMsg) title = firstUserMsg.text.slice(0, 30) + '...';
-        }
-        return { ...s, messages: newMessages, title, lastModified: Date.now() };
-      }
-      return s;
-    }));
+    setSessions(prev => {
+        const updatedSessions = prev.map(s => {
+          if (s.id === currentSessionId) {
+            let title = s.title;
+            // Update title based on first user message
+            if (s.title === 'چت جدید' && newMessages.length > 1) {
+                const firstUserMsg = newMessages.find(m => m.role === 'user');
+                if (firstUserMsg) title = firstUserMsg.text.slice(0, 30) + '...';
+            }
+            
+            const updatedSession = { ...s, messages: newMessages, title, lastModified: Date.now() };
+            
+            // Persist to DB asynchronously
+            if (currentUser?.user_id) {
+                chatPersistence.saveSession(currentUser.user_id, updatedSession);
+            }
+            
+            return updatedSession;
+          }
+          return s;
+        });
+        return updatedSessions;
+    });
   };
 
-  const deleteSession = (e: React.MouseEvent, id: string) => {
+  const deleteSession = async (e: React.MouseEvent, id: string) => {
     e.stopPropagation();
+    
+    // DB Remove
+    await chatPersistence.deleteSession(id);
+
+    // State Remove
     const newSessions = sessions.filter(s => s.id !== id);
     setSessions(newSessions);
+    
     if (currentSessionId === id && newSessions.length > 0) {
         setCurrentSessionId(newSessions[0].id);
-    } else if (newSessions.length === 0) {
-        createNewSession();
+    } else if (newSessions.length === 0 && currentUser) {
+        createNewSession(currentUser.user_id);
     }
   };
 
@@ -132,8 +188,6 @@ const App: React.FC = () => {
     updateCurrentSession(updatedWithUser);
 
     try {
-      // Send the previous history (currentMsgs) and the new prompt (userText)
-      // This ensures each session maintains its own isolated memory
       const response = await sendMessageToGemini(userText, currentMsgs);
       
       const botMsg: ChatMessageType = {
@@ -158,7 +212,6 @@ const App: React.FC = () => {
     }
   };
 
-  // Comparison Logic - Memoized to prevent re-renders
   const toggleComparison = useCallback((product: ProductMatch) => {
     setComparisonList(prev => {
         const exists = prev.find(p => p.title === product.title);
@@ -180,6 +233,33 @@ const App: React.FC = () => {
       handleSend();
     }
   };
+
+  const handleLogout = () => {
+      authService.logout();
+      setCurrentUser(null);
+      setSessions([]);
+  };
+
+  const onAuthSuccess = (user: User) => {
+      setCurrentUser(user);
+      loadUserData(user.user_id);
+  };
+  
+  const handleAdminLogout = () => {
+      setIsAdminLoggedIn(false);
+  };
+
+  // RENDER LOGIC
+  if (!authChecked) return <div className="bg-black h-screen flex items-center justify-center text-primary">Loading...</div>;
+
+  // Render Admin Dashboard
+  if (isAdminLoggedIn) {
+      return <AdminDashboard onLogout={handleAdminLogout} />;
+  }
+
+  if (!currentUser) {
+      return <AuthScreen onAuthSuccess={onAuthSuccess} onAdminLogin={() => setIsAdminLoggedIn(true)} />;
+  }
 
   return (
     <div className="flex h-screen bg-black text-gray-100 font-sans overflow-hidden" dir="rtl">
@@ -211,7 +291,7 @@ const App: React.FC = () => {
 
         <div className="p-4">
            <button 
-             onClick={createNewSession}
+             onClick={() => createNewSession()}
              className="w-full flex items-center gap-2 bg-primary hover:bg-green-400 text-black font-bold py-3 px-4 rounded-xl transition-all shadow-lg shadow-primary/10 hover:shadow-primary/30"
            >
              <Plus size={20} />
@@ -244,10 +324,23 @@ const App: React.FC = () => {
            ))}
         </div>
         
-        <div className="p-6 border-t border-white/5 text-center">
-            <h1 className="text-2xl font-black bg-gradient-to-r from-primary via-white to-primary bg-clip-text text-transparent animate-pulse-slow tracking-wider drop-shadow-lg">
-                Mobinext
-            </h1>
+        <div className="p-4 border-t border-white/5">
+            <div className="flex items-center gap-3 mb-4 px-2">
+                <div className="w-8 h-8 rounded-full bg-white/10 flex items-center justify-center">
+                    <UserIcon size={16} className="text-primary" />
+                </div>
+                <div className="flex flex-col">
+                    <span className="text-sm font-bold text-white">{currentUser.name} {currentUser.last_name}</span>
+                    <span className="text-xs text-gray-500">{currentUser.username}</span>
+                </div>
+            </div>
+            <button 
+              onClick={handleLogout}
+              className="w-full flex items-center justify-center gap-2 text-red-400 hover:bg-red-500/10 py-2 rounded-lg transition-colors text-sm"
+            >
+                <LogOut size={16} />
+                <span>خروج از حساب</span>
+            </button>
         </div>
       </aside>
 
@@ -340,9 +433,6 @@ const App: React.FC = () => {
               <Send size={20} className={isLoading ? 'opacity-0' : 'ml-0.5'} />
             </button>
           </div>
-          <p dir="ltr" className="text-center text-sm font-bold text-gray-400 mt-4 flex items-center justify-center gap-2 animate-pulse hover:text-white transition-all duration-300">
-              Created by Reza <span className="text-red-500 text-lg drop-shadow-lg">❤️</span>
-          </p>
         </div>
       </div>
 
@@ -422,7 +512,6 @@ with open(output_filename, 'w', encoding='utf-8') as outfile:
 print(f"\nعملیات با موفقیت تمام شد! تمام کدها در فایل '{output_filename}' ذخیره شدند.")
 -------------------------
 .\index.html:
-
 <!DOCTYPE html>
 <html lang="fa" dir="rtl">
   <head>
@@ -466,6 +555,35 @@ print(f"\nعملیات با موفقیت تمام شد! تمام کدها در �
               popIn: {
                 '0%': { opacity: '0', transform: 'scale(0.9)' },
                 '100%': { opacity: '1', transform: 'scale(1)' },
+              }
+            }
+          }
+        }
+      }
+    </script>
+  <script type="importmap">
+{
+  "imports": {
+    "react-dom/": "https://aistudiocdn.com/react-dom@^19.2.1/",
+    "path": "https://aistudiocdn.com/path@^0.12.7",
+    "react/": "https://aistudiocdn.com/react@^19.2.1/",
+    "react": "https://aistudiocdn.com/react@^19.2.1",
+    "url": "https://aistudiocdn.com/url@^0.11.4",
+    "lucide-react": "https://aistudiocdn.com/lucide-react@^0.556.0",
+    "react-markdown": "https://aistudiocdn.com/react-markdown@^10.1.0",
+    "vite": "https://aistudiocdn.com/vite@^7.2.7",
+    "@google/genai": "https://aistudiocdn.com/@google/genai@^1.32.0",
+    "@supabase/supabase-js": "https://aistudiocdn.com/@supabase/supabase-js@^2.87.0"
+  }
+}
+</script>
+<link rel="stylesheet" href="/index.css">
+</head>
+  <body class="bg-black text-gray-100">
+    <div id="root"></div>
+    <script type="module" src="/index.tsx"></script>
+  </body>
+</html>
 -------------------------
 .\index.tsx:
 import React from 'react';
@@ -483,7 +601,6 @@ root.render(
     <App />
   </React.StrictMode>
 );
-
 -------------------------
 .\metadata.json:
 {
@@ -504,20 +621,23 @@ root.render(
     "preview": "vite preview"
   },
   "dependencies": {
-
+    "@google/genai": "^0.2.1",
+    "@supabase/supabase-js": "^2.39.7",
+    "lucide-react": "^0.475.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-markdown": "^9.0.3"
   },
   "devDependencies": {
     "@types/node": "^22.14.0",
-    
+    "@types/react": "^18.3.3",
+    "@types/react-dom": "^18.3.0",
     "typescript": "~5.8.2",
     "vite": "^6.2.0"
   }
 }
-
 -------------------------
 .\README.md:
-
-```markdown
 # StarCycle - Mobinext AI Chatbot
 
 An intelligent conversational AI assistant for StarCycle motorcycle parts store, built with Next.js and powered by artificial intelligence.
@@ -751,9 +871,74 @@ For technical support or questions:
 ---
 
 **Built with ❤️ by Mobinext for StarCycle**
-```
+-------------------------
+.\SQL.txt:
+-- راهنمای جامع دیتابیس
+-- این کدها را کپی کرده و در بخش SQL Editor در داشبورد Supabase اجرا کنید.
 
-این متن کامل و حرفه‌ای شامل تمام بخش‌های لازم برای یک README عالی است. می‌توانید مستقیماً کپی کرده و استفاده کنید!
+-- 1. ساخت جدول کاربران (users)
+CREATE TABLE IF NOT EXISTS users (
+  user_id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+  number TEXT UNIQUE NOT NULL,
+  username TEXT UNIQUE NOT NULL,
+  name TEXT,
+  last_name TEXT,
+  pass TEXT NOT NULL,
+  signup_Date TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+ALTER TABLE users ENABLE ROW LEVEL SECURITY;
+
+-- 2. ساخت جدول نشست‌های چت (chat_sessions)
+CREATE TABLE IF NOT EXISTS chat_sessions (
+  id TEXT PRIMARY KEY,
+  user_id UUID REFERENCES users(user_id) ON DELETE CASCADE,
+  title TEXT,
+  messages JSONB,
+  last_modified TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+ALTER TABLE chat_sessions ENABLE ROW LEVEL SECURITY;
+
+-- ایجاد ایندکس
+CREATE INDEX IF NOT EXISTS idx_chat_sessions_user_id ON chat_sessions(user_id);
+
+-- 3. ساخت جدول ادمین (admins)
+CREATE TABLE IF NOT EXISTS admins (
+  id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+  username TEXT UNIQUE NOT NULL,
+  pass TEXT NOT NULL
+);
+ALTER TABLE admins ENABLE ROW LEVEL SECURITY;
+
+
+
+
+
+
+
+
+
+CREATE TABLE IF NOT EXISTS public.admins (
+    id SERIAL PRIMARY KEY,
+    username TEXT UNIQUE NOT NULL,
+    pass TEXT NOT NULL
+);
+
+
+
+INSERT INTO public.admins (username, pass)
+VALUES ('Admin', 'Admin')
+ON CONFLICT (username) DO NOTHING;
+
+
+
+ALTER TABLE public.admins ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "Enable read access for admins"
+ON public.admins
+FOR SELECT
+TO anon
+USING (true);
+
 -------------------------
 .\tsconfig.json:
 {
@@ -787,7 +972,6 @@ For technical support or questions:
 }
 -------------------------
 .\types.ts:
-
 export interface Product {
   id?: string | number;
   title: string;
@@ -820,6 +1004,15 @@ export interface Session {
   lastModified: number;
 }
 
+export interface User {
+  user_id: string;
+  number: string;
+  username: string;
+  name: string;
+  last_name: string;
+  signup_Date: string;
+}
+
 export interface FilterParams {
   category?: string;
   min_price?: number;
@@ -829,12 +1022,14 @@ export interface FilterParams {
 }
 
 export const DATA_URL = "https://raw.githubusercontent.com/RezaSbu/Database/refs/heads/main/optimized_products_final_updated.json";
-
 -------------------------
 .\vite.config.ts:
 import path from 'path';
 import { defineConfig, loadEnv } from 'vite';
+import { fileURLToPath } from 'url';
 
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 export default defineConfig(({ mode }) => {
     const env = loadEnv(mode, '.', '');
@@ -846,7 +1041,9 @@ export default defineConfig(({ mode }) => {
       plugins: [],
       define: {
         'process.env.API_KEY': JSON.stringify(env.GEMINI_API_KEY),
-        'process.env.GEMINI_API_KEY': JSON.stringify(env.GEMINI_API_KEY)
+        'process.env.GEMINI_API_KEY': JSON.stringify(env.GEMINI_API_KEY),
+        'process.env.SUPABASE_URL': JSON.stringify("https://jhjlxljhijhrvclgsbzc.supabase.co"),
+        'process.env.SUPABASE_KEY': JSON.stringify("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Impoamx4bGpoaWpocnZjbGdzYnpjIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjUyNjQ4NzYsImV4cCI6MjA4MDg0MDg3Nn0.8WwtsrOE3Fch_vFczeu6Fz9A2QiO_Pbwh_MxuhFUFwY")
       },
       resolve: {
         alias: {
@@ -855,10 +1052,9 @@ export default defineConfig(({ mode }) => {
       }
     };
 });
-
 -------------------------
 .\.git\COMMIT_EDITMSG:
-Readme and a liitle not importatnt ui has changed
+project_code_dump.txt has been changed
 
 -------------------------
 .\.git\config:
@@ -880,6 +1076,10 @@ Readme and a liitle not importatnt ui has changed
 	vscode-merge-base = origin/main
 	remote = origin
 	merge = refs/heads/V1.1
+[branch "Login"]
+	remote = origin
+	merge = refs/heads/Login
+	vscode-merge-base = origin/main
 
 -------------------------
 .\.git\description:
@@ -887,16 +1087,17 @@ Unnamed repository; edit this file 'description' to name the repository.
 
 -------------------------
 .\.git\FETCH_HEAD:
-cc0a61c89453efaef6617dcea8ec942d7771c22b		branch 'main' of https://github.com/RezaSbu/NeuraQueen
+6729bed0e42539ff07bd6d796ab834fcbde72839		branch 'Login' of https://github.com/RezaSbu/NeuraQueen
 7ec4c17df8d876639885cee888056ce707dfd69a	not-for-merge	branch 'V1.1' of https://github.com/RezaSbu/NeuraQueen
+2e05f5ccd2850f03d9d7603afdf3571735796e40	not-for-merge	branch 'main' of https://github.com/RezaSbu/NeuraQueen
 
 -------------------------
 .\.git\HEAD:
-ref: refs/heads/main
+ref: refs/heads/Login
 
 -------------------------
 .\.git\ORIG_HEAD:
-38816cfd89f9c033a4f52c4722b792a9ced985cb
+6729bed0e42539ff07bd6d796ab834fcbde72839
 
 -------------------------
 .\.git\packed-refs:
@@ -1833,12 +2034,26 @@ exit 0
 38816cfd89f9c033a4f52c4722b792a9ced985cb 7ec4c17df8d876639885cee888056ce707dfd69a RezaSbu <Ahmadireza582@gmail.com> 1765034017 +0330	checkout: moving from main to V1.1
 7ec4c17df8d876639885cee888056ce707dfd69a 38816cfd89f9c033a4f52c4722b792a9ced985cb RezaSbu <Ahmadireza582@gmail.com> 1765034028 +0330	checkout: moving from V1.1 to main
 38816cfd89f9c033a4f52c4722b792a9ced985cb cc0a61c89453efaef6617dcea8ec942d7771c22b RezaSbu <Ahmadireza582@gmail.com> 1765034034 +0330	pull: Fast-forward
+cc0a61c89453efaef6617dcea8ec942d7771c22b 1605310c8478227fc1f9450c42af72bcf46eb620 RezaSbu <Ahmadireza582@gmail.com> 1765272840 +0330	commit: Guilde code has changed
+1605310c8478227fc1f9450c42af72bcf46eb620 1605310c8478227fc1f9450c42af72bcf46eb620 RezaSbu <Ahmadireza582@gmail.com> 1765275960 +0330	checkout: moving from main to Login
+1605310c8478227fc1f9450c42af72bcf46eb620 1605310c8478227fc1f9450c42af72bcf46eb620 RezaSbu <Ahmadireza582@gmail.com> 1765275969 +0330	checkout: moving from Login to Login
+1605310c8478227fc1f9450c42af72bcf46eb620 227bd81ff1fe7e3233d433f452dd7ae6559173e7 RezaSbu <Ahmadireza582@gmail.com> 1765278303 +0330	commit: Login forn And Database Added
+227bd81ff1fe7e3233d433f452dd7ae6559173e7 72f5b44330f89997d2273ae4ccdfe8c629a454c5 RezaSbu <Ahmadireza582@gmail.com> 1765282448 +0330	commit: Admin Database and Dashboard
+72f5b44330f89997d2273ae4ccdfe8c629a454c5 6729bed0e42539ff07bd6d796ab834fcbde72839 RezaSbu <Ahmadireza582@gmail.com> 1765282686 +0330	commit: project_code_dump.txt has been changed
+
+-------------------------
+.\.git\logs\refs\heads\Login:
+0000000000000000000000000000000000000000 1605310c8478227fc1f9450c42af72bcf46eb620 RezaSbu <Ahmadireza582@gmail.com> 1765275960 +0330	branch: Created from HEAD
+1605310c8478227fc1f9450c42af72bcf46eb620 227bd81ff1fe7e3233d433f452dd7ae6559173e7 RezaSbu <Ahmadireza582@gmail.com> 1765278303 +0330	commit: Login forn And Database Added
+227bd81ff1fe7e3233d433f452dd7ae6559173e7 72f5b44330f89997d2273ae4ccdfe8c629a454c5 RezaSbu <Ahmadireza582@gmail.com> 1765282448 +0330	commit: Admin Database and Dashboard
+72f5b44330f89997d2273ae4ccdfe8c629a454c5 6729bed0e42539ff07bd6d796ab834fcbde72839 RezaSbu <Ahmadireza582@gmail.com> 1765282686 +0330	commit: project_code_dump.txt has been changed
 
 -------------------------
 .\.git\logs\refs\heads\main:
 0000000000000000000000000000000000000000 430a1e71314e0b97caa64260716e0cca74a0f76b RezaSbu <Ahmadireza582@gmail.com> 1765031838 +0330	clone: from https://github.com/RezaSbu/NeuraQueen.git
 430a1e71314e0b97caa64260716e0cca74a0f76b 38816cfd89f9c033a4f52c4722b792a9ced985cb RezaSbu <Ahmadireza582@gmail.com> 1765033645 +0330	commit: Base project
 38816cfd89f9c033a4f52c4722b792a9ced985cb cc0a61c89453efaef6617dcea8ec942d7771c22b RezaSbu <Ahmadireza582@gmail.com> 1765034034 +0330	pull: Fast-forward
+cc0a61c89453efaef6617dcea8ec942d7771c22b 1605310c8478227fc1f9450c42af72bcf46eb620 RezaSbu <Ahmadireza582@gmail.com> 1765272840 +0330	commit: Guilde code has changed
 
 -------------------------
 .\.git\logs\refs\heads\V1.1:
@@ -1850,17 +2065,29 @@ exit 0
 0000000000000000000000000000000000000000 430a1e71314e0b97caa64260716e0cca74a0f76b RezaSbu <Ahmadireza582@gmail.com> 1765031838 +0330	clone: from https://github.com/RezaSbu/NeuraQueen.git
 
 -------------------------
+.\.git\logs\refs\remotes\origin\Login:
+0000000000000000000000000000000000000000 227bd81ff1fe7e3233d433f452dd7ae6559173e7 RezaSbu <Ahmadireza582@gmail.com> 1765278349 +0330	update by push
+227bd81ff1fe7e3233d433f452dd7ae6559173e7 72f5b44330f89997d2273ae4ccdfe8c629a454c5 RezaSbu <Ahmadireza582@gmail.com> 1765282454 +0330	update by push
+72f5b44330f89997d2273ae4ccdfe8c629a454c5 6729bed0e42539ff07bd6d796ab834fcbde72839 RezaSbu <Ahmadireza582@gmail.com> 1765282691 +0330	update by push
+
+-------------------------
 .\.git\logs\refs\remotes\origin\main:
 430a1e71314e0b97caa64260716e0cca74a0f76b 38816cfd89f9c033a4f52c4722b792a9ced985cb RezaSbu <Ahmadireza582@gmail.com> 1765033651 +0330	update by push
 38816cfd89f9c033a4f52c4722b792a9ced985cb cc0a61c89453efaef6617dcea8ec942d7771c22b RezaSbu <Ahmadireza582@gmail.com> 1765034025 +0330	pull: fast-forward
+cc0a61c89453efaef6617dcea8ec942d7771c22b 1605310c8478227fc1f9450c42af72bcf46eb620 RezaSbu <Ahmadireza582@gmail.com> 1765272845 +0330	update by push
+1605310c8478227fc1f9450c42af72bcf46eb620 2e05f5ccd2850f03d9d7603afdf3571735796e40 RezaSbu <Ahmadireza582@gmail.com> 1765482628 +0330	pull: fast-forward
 
 -------------------------
 .\.git\logs\refs\remotes\origin\V1.1:
 0000000000000000000000000000000000000000 7ec4c17df8d876639885cee888056ce707dfd69a RezaSbu <Ahmadireza582@gmail.com> 1765033935 +0330	update by push
 
 -------------------------
+.\.git\refs\heads\Login:
+6729bed0e42539ff07bd6d796ab834fcbde72839
+
+-------------------------
 .\.git\refs\heads\main:
-cc0a61c89453efaef6617dcea8ec942d7771c22b
+1605310c8478227fc1f9450c42af72bcf46eb620
 
 -------------------------
 .\.git\refs\heads\V1.1:
@@ -1871,16 +2098,676 @@ cc0a61c89453efaef6617dcea8ec942d7771c22b
 ref: refs/remotes/origin/main
 
 -------------------------
+.\.git\refs\remotes\origin\Login:
+6729bed0e42539ff07bd6d796ab834fcbde72839
+
+-------------------------
 .\.git\refs\remotes\origin\main:
-cc0a61c89453efaef6617dcea8ec942d7771c22b
+2e05f5ccd2850f03d9d7603afdf3571735796e40
 
 -------------------------
 .\.git\refs\remotes\origin\V1.1:
 7ec4c17df8d876639885cee888056ce707dfd69a
 
 -------------------------
-.\components\ChatMessage.tsx:
+.\components\AdminDashboard.tsx:
+import React, { useState, useEffect } from 'react';
+import { adminService } from '../services/adminService';
+import ReactMarkdown from 'react-markdown';
+import { 
+  Users, MessageSquare, Database, Download, LogOut, 
+  BarChart3, Activity, Search, Calendar, ShieldCheck, 
+  Trash2, Sparkles, TrendingUp, AlertCircle, RefreshCw
+} from 'lucide-react';
 
+interface Props {
+  onLogout: () => void;
+}
+
+const AdminDashboard: React.FC<Props> = ({ onLogout }) => {
+  const [activeTab, setActiveTab] = useState<'overview' | 'users' | 'sessions' | 'ai_insight'>('overview');
+  const [stats, setStats] = useState({ usersCount: 0, sessionsCount: 0, totalMessages: 0, messagesToday: 0 });
+  const [usersData, setUsersData] = useState<any[]>([]);
+  const [sessionsData, setSessionsData] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+  
+  // New States
+  const [searchTerm, setSearchTerm] = useState('');
+  const [aiReport, setAiReport] = useState('');
+  const [loadingReport, setLoadingReport] = useState(false);
+
+  useEffect(() => {
+    loadData();
+  }, []);
+
+  const loadData = async () => {
+    setLoading(true);
+    const s = await adminService.getStats();
+    setStats(s);
+    
+    const u = await adminService.getUsers();
+    setUsersData(u);
+    
+    const c = await adminService.getSessions();
+    setSessionsData(c);
+    setLoading(false);
+  };
+
+  const handleDeleteUser = async (userId: string) => {
+      if(!window.confirm("آیا از حذف این کاربر و تمام چت‌های او اطمینان دارید؟")) return;
+      
+      const res = await adminService.deleteUser(userId);
+      if(res.success) {
+          setUsersData(prev => prev.filter(u => u.user_id !== userId));
+          // Refresh stats slightly
+          setStats(prev => ({...prev, usersCount: prev.usersCount - 1}));
+      } else {
+          alert("خطا در حذف کاربر");
+      }
+  };
+
+  const handleGenerateReport = async () => {
+      setLoadingReport(true);
+      const report = await adminService.generateBusinessReport();
+      setAiReport(report);
+      setLoadingReport(false);
+  };
+
+  const downloadJSON = (data: any[], filename: string) => {
+    const jsonString = JSON.stringify(data, null, 2);
+    const blob = new Blob([jsonString], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `${filename}_${new Date().toISOString().split('T')[0]}.json`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
+  // Filter Users
+  const filteredUsers = usersData.filter(user => 
+    (user.name?.toLowerCase() || '').includes(searchTerm.toLowerCase()) ||
+    (user.username?.toLowerCase() || '').includes(searchTerm.toLowerCase()) ||
+    (user.number || '').includes(searchTerm)
+  );
+
+  if (loading) return (
+    <div className="min-h-screen bg-[#09090b] text-white flex flex-col items-center justify-center gap-4">
+        <div className="w-12 h-12 border-4 border-primary/30 border-t-primary rounded-full animate-spin"></div>
+        <p className="animate-pulse">در حال بارگذاری داده‌های مدیریتی...</p>
+    </div>
+  );
+
+  return (
+    <div className="min-h-screen bg-[#050505] text-white font-sans overflow-hidden flex" dir="rtl">
+      
+      {/* Sidebar - Glassmorphism */}
+      <aside className="w-72 bg-[#121212]/50 backdrop-blur-xl border-l border-white/5 flex flex-col h-screen fixed right-0 top-0 z-50">
+        <div className="p-8 border-b border-white/5">
+            <div className="flex items-center gap-3 mb-1">
+                <div className="w-10 h-10 rounded-xl bg-gradient-to-tr from-red-600 to-orange-600 flex items-center justify-center shadow-lg shadow-red-500/20">
+                    <ShieldCheck className="text-white" size={20} />
+                </div>
+                <div>
+                    <h1 className="font-bold text-lg tracking-wide">پنل مدیریت</h1>
+                    <span className="text-[10px] text-gray-500 uppercase tracking-widest">StarCycle Admin</span>
+                </div>
+            </div>
+        </div>
+
+        <nav className="flex-1 p-4 space-y-2 overflow-y-auto">
+            <NavButton active={activeTab === 'overview'} onClick={() => setActiveTab('overview')} icon={BarChart3} label="داشبورد و آمار" />
+            <NavButton active={activeTab === 'ai_insight'} onClick={() => setActiveTab('ai_insight')} icon={Sparkles} label="هوش مصنوعی (جدید)" isNew />
+            <NavButton active={activeTab === 'users'} onClick={() => setActiveTab('users')} icon={Users} label="مدیریت کاربران" badge={usersData.length} />
+            <NavButton active={activeTab === 'sessions'} onClick={() => setActiveTab('sessions')} icon={MessageSquare} label="تاریخچه چت‌ها" />
+        </nav>
+
+        <div className="p-4 border-t border-white/5 bg-gradient-to-t from-red-900/10 to-transparent">
+            <button 
+                onClick={onLogout}
+                className="w-full flex items-center gap-3 p-3 rounded-xl text-red-400 hover:bg-red-500/10 hover:text-red-300 transition-all duration-300 group"
+            >
+                <LogOut size={20} className="group-hover:-translate-x-1 transition-transform" />
+                <span className="font-medium">خروج امن</span>
+            </button>
+        </div>
+      </aside>
+
+      {/* Main Content */}
+      <main className="flex-1 mr-72 p-8 h-screen overflow-y-auto scrollbar-thin scrollbar-thumb-white/10 scrollbar-track-transparent">
+        
+        {/* OVERVIEW TAB */}
+        {activeTab === 'overview' && (
+            <div className="space-y-8 animate-fadeIn max-w-6xl mx-auto">
+                <header className="flex justify-between items-end">
+                    <div>
+                        <h2 className="text-3xl font-bold bg-clip-text text-transparent bg-gradient-to-l from-white to-gray-500 mb-2">داشبورد وضعیت</h2>
+                        <p className="text-gray-400">نمای کلی از عملکرد ربات و تعامل کاربران</p>
+                    </div>
+                    <button onClick={loadData} className="p-2 bg-white/5 hover:bg-white/10 rounded-full transition-colors"><RefreshCw size={20} /></button>
+                </header>
+
+                {/* Stats Grid */}
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+                    <StatCard title="کل کاربران" value={stats.usersCount} icon={Users} color="blue" />
+                    <StatCard title="نشست‌های فعال" value={stats.sessionsCount} icon={MessageSquare} color="green" />
+                    <StatCard title="کل پیام‌ها" value={stats.totalMessages} icon={Database} color="yellow" />
+                    <StatCard title="پیام‌های امروز" value={stats.messagesToday} icon={Calendar} color="purple" />
+                </div>
+
+                {/* Charts Area */}
+                <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                    {/* User Growth Chart (Simulated) */}
+                    <div className="lg:col-span-2 bg-[#121212] border border-white/5 rounded-3xl p-6 relative overflow-hidden">
+                        <div className="flex justify-between items-center mb-6">
+                            <h3 className="font-bold text-lg flex items-center gap-2">
+                                <TrendingUp className="text-primary" size={20} />
+                                رشد کاربران
+                            </h3>
+                            <span className="text-xs bg-white/5 px-2 py-1 rounded-md text-gray-400">هفتگی</span>
+                        </div>
+                        <div className="h-48 flex items-end gap-4 justify-between px-2">
+                            {/* Dummy Chart Bars */}
+                            {[30, 45, 35, 60, 55, 75, 90].map((h, i) => (
+                                <div key={i} className="flex-1 flex flex-col justify-end group">
+                                    <div 
+                                        style={{ height: `${h}%` }} 
+                                        className="w-full bg-gradient-to-t from-primary/20 to-primary/80 rounded-t-lg transition-all duration-500 group-hover:from-primary/40 group-hover:to-primary"
+                                    ></div>
+                                </div>
+                            ))}
+                        </div>
+                        <div className="flex justify-between mt-2 text-xs text-gray-500 px-1">
+                            <span>شنبه</span><span>جمعه</span>
+                        </div>
+                    </div>
+
+                    {/* Quick Actions */}
+                    <div className="bg-[#121212] border border-white/5 rounded-3xl p-6 flex flex-col justify-center gap-4">
+                        <h3 className="font-bold text-gray-300 mb-2">دسترسی سریع</h3>
+                        <button onClick={() => downloadJSON(usersData, 'users_db')} className="w-full flex items-center justify-between bg-white/5 hover:bg-white/10 p-4 rounded-xl transition-all border border-white/5 hover:border-white/20">
+                            <div className="flex items-center gap-3">
+                                <div className="bg-blue-500/20 p-2 rounded-lg"><Download className="text-blue-500" size={18} /></div>
+                                <span className="text-sm">دانلود دیتابیس کاربران</span>
+                            </div>
+                        </button>
+                        <button onClick={() => downloadJSON(sessionsData, 'chat_sessions_db')} className="w-full flex items-center justify-between bg-white/5 hover:bg-white/10 p-4 rounded-xl transition-all border border-white/5 hover:border-white/20">
+                            <div className="flex items-center gap-3">
+                                <div className="bg-green-500/20 p-2 rounded-lg"><Download className="text-green-500" size={18} /></div>
+                                <span className="text-sm">دانلود دیتابیس چت‌ها</span>
+                            </div>
+                        </button>
+                    </div>
+                </div>
+            </div>
+        )}
+
+        {/* AI INSIGHT TAB */}
+        {activeTab === 'ai_insight' && (
+             <div className="space-y-6 animate-fadeIn max-w-4xl mx-auto">
+                <div className="bg-gradient-to-r from-indigo-900/50 to-purple-900/50 border border-indigo-500/30 rounded-3xl p-8 relative overflow-hidden">
+                    <Sparkles className="absolute top-4 left-4 text-indigo-400 opacity-50" size={100} />
+                    <div className="relative z-10">
+                        <h2 className="text-3xl font-bold mb-4">هوش مصنوعی تحلیلگر بازار</h2>
+                        <p className="text-indigo-200 mb-6 max-w-xl leading-relaxed">
+                            این قابلیت با بررسی ۵۰ پیام آخر کاربران، یک گزارش جامع از نیازهای بازار، کالاهای پرتقاضا و رفتار مشتریان تولید می‌کند.
+                        </p>
+                        <button 
+                            onClick={handleGenerateReport}
+                            disabled={loadingReport}
+                            className="bg-white text-indigo-900 hover:bg-indigo-50 font-bold px-8 py-4 rounded-2xl shadow-xl shadow-indigo-900/50 transition-all flex items-center gap-3 disabled:opacity-70 disabled:cursor-not-allowed"
+                        >
+                            {loadingReport ? (
+                                <><div className="w-5 h-5 border-2 border-indigo-900 border-t-transparent rounded-full animate-spin"/> در حال تحلیل...</>
+                            ) : (
+                                <><Sparkles size={20} /> تولید گزارش هوشمند</>
+                            )}
+                        </button>
+                    </div>
+                </div>
+
+                {aiReport && (
+                    <div className="bg-[#121212] border border-white/10 rounded-3xl p-8 animate-slideUp">
+                        <h3 className="text-xl font-bold mb-6 text-primary border-b border-white/5 pb-4">نتایج تحلیل:</h3>
+                        <div className="markdown-content text-gray-300 leading-8">
+                             <ReactMarkdown components={{strong: ({node, ...props}) => <span className="text-white font-bold bg-white/10 px-1 rounded" {...props} />}}>{aiReport}</ReactMarkdown>
+                        </div>
+                    </div>
+                )}
+             </div>
+        )}
+
+        {/* USERS TAB */}
+        {activeTab === 'users' && (
+            <div className="space-y-6 animate-fadeIn max-w-6xl mx-auto">
+                <div className="flex flex-col md:flex-row justify-between items-center gap-4">
+                    <h2 className="text-2xl font-bold">مدیریت کاربران</h2>
+                    <div className="relative w-full md:w-96">
+                        <Search className="absolute right-3 top-3 text-gray-500" size={20} />
+                        <input 
+                            type="text" 
+                            placeholder="جستجو با نام، نام کاربری یا شماره..." 
+                            value={searchTerm}
+                            onChange={(e) => setSearchTerm(e.target.value)}
+                            className="w-full bg-[#121212] border border-white/10 focus:border-primary/50 rounded-xl py-2.5 pr-10 pl-4 text-white outline-none"
+                        />
+                    </div>
+                </div>
+                
+                {usersData.length === 0 ? (
+                     <div className="flex flex-col items-center justify-center py-20 bg-[#121212] rounded-3xl border border-white/5 border-dashed">
+                        <AlertCircle className="text-gray-600 mb-4" size={48} />
+                        <p className="text-gray-500">هیچ کاربری یافت نشد.</p>
+                     </div>
+                ) : (
+                    <div className="bg-[#121212] rounded-3xl border border-white/5 overflow-hidden shadow-2xl">
+                        <div className="overflow-x-auto">
+                            <table className="w-full text-right">
+                                <thead className="bg-white/5 text-gray-400 text-xs uppercase tracking-wider">
+                                    <tr>
+                                        <th className="p-5">کاربر</th>
+                                        <th className="p-5">اطلاعات تماس</th>
+                                        <th className="p-5">تاریخ عضویت</th>
+                                        <th className="p-5 text-center">عملیات</th>
+                                    </tr>
+                                </thead>
+                                <tbody className="divide-y divide-white/5">
+                                    {filteredUsers.map((user) => (
+                                        <tr key={user.user_id} className="hover:bg-white/[0.02] transition-colors group">
+                                            <td className="p-5">
+                                                <div className="flex items-center gap-3">
+                                                    <div className="w-10 h-10 rounded-full bg-gradient-to-br from-gray-700 to-gray-800 flex items-center justify-center text-sm font-bold">
+                                                        {(user.name?.[0] || 'U').toUpperCase()}
+                                                    </div>
+                                                    <div>
+                                                        <div className="font-bold text-white">{user.name} {user.last_name}</div>
+                                                        <div className="text-xs text-gray-500 font-mono">@{user.username}</div>
+                                                    </div>
+                                                </div>
+                                            </td>
+                                            <td className="p-5 font-mono text-gray-400">{user.number}</td>
+                                            <td className="p-5 text-gray-400 text-sm">
+                                                {new Date(user.signup_date || user.signup_Date).toLocaleDateString('fa-IR')}
+                                            </td>
+                                            <td className="p-5 text-center">
+                                                <button 
+                                                    onClick={() => handleDeleteUser(user.user_id)}
+                                                    className="p-2 text-gray-600 hover:text-red-500 hover:bg-red-500/10 rounded-lg transition-all" 
+                                                    title="حذف کاربر"
+                                                >
+                                                    <Trash2 size={18} />
+                                                </button>
+                                            </td>
+                                        </tr>
+                                    ))}
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                )}
+            </div>
+        )}
+
+        {/* SESSIONS TAB */}
+        {activeTab === 'sessions' && (
+            <div className="space-y-6 animate-fadeIn max-w-6xl mx-auto">
+                 <div className="flex justify-between items-center">
+                    <h2 className="text-2xl font-bold">تاریخچه چت‌ها</h2>
+                </div>
+
+                <div className="grid gap-4">
+                    {sessionsData.slice(0, 50).map((session, idx) => (
+                        <div key={idx} className="bg-[#121212] p-5 rounded-2xl border border-white/5 hover:border-primary/20 transition-all group">
+                            <div className="flex justify-between items-start mb-3">
+                                <div className="flex items-center gap-3">
+                                    <div className="bg-white/5 p-2 rounded-lg text-primary"><MessageSquare size={18} /></div>
+                                    <div>
+                                        <h4 className="font-bold text-gray-200">{session.title || 'بدون عنوان'}</h4>
+                                        <span className="text-[10px] text-gray-500 font-mono uppercase tracking-wider">ID: {session.id}</span>
+                                    </div>
+                                </div>
+                                <span className="text-xs text-gray-500 bg-black/40 px-2 py-1 rounded-md">{new Date(session.last_modified).toLocaleString('fa-IR')}</span>
+                            </div>
+                            
+                            <div className="bg-[#09090b] p-4 rounded-xl max-h-40 overflow-y-auto text-sm space-y-3 custom-scrollbar">
+                                {session.messages?.map((m: any, i: number) => (
+                                    <div key={i} className={`flex gap-3 ${m.role === 'user' ? 'flex-row-reverse' : ''}`}>
+                                        <span className={`text-[10px] font-bold uppercase px-1 py-0.5 rounded h-fit ${m.role === 'user' ? 'bg-gray-800 text-gray-400' : 'bg-primary/20 text-primary'}`}>
+                                            {m.role === 'user' ? 'User' : 'Bot'}
+                                        </span>
+                                        <p className={`text-gray-400 leading-relaxed ${m.role === 'user' ? 'text-right' : 'text-left'} w-full`}>{m.text}</p>
+                                    </div>
+                                ))}
+                            </div>
+                        </div>
+                    ))}
+                </div>
+            </div>
+        )}
+      </main>
+    </div>
+  );
+};
+
+// Helper Components
+const StatCard = ({ title, value, icon: Icon, color }: any) => {
+    const colorStyles: any = {
+        blue: "from-blue-500/20 to-blue-600/5 text-blue-500",
+        green: "from-green-500/20 to-green-600/5 text-green-500",
+        yellow: "from-yellow-500/20 to-yellow-600/5 text-yellow-500",
+        purple: "from-purple-500/20 to-purple-600/5 text-purple-500",
+    };
+
+    return (
+        <div className="bg-[#121212] border border-white/5 p-6 rounded-3xl relative overflow-hidden group hover:-translate-y-1 transition-transform duration-300">
+            <div className={`absolute top-0 right-0 w-32 h-32 bg-gradient-to-br ${colorStyles[color]} blur-2xl rounded-full -mr-10 -mt-10 pointer-events-none`}></div>
+            <div className="relative z-10 flex justify-between items-start">
+                <div>
+                    <p className="text-gray-400 text-sm font-medium mb-1">{title}</p>
+                    <h3 className="text-4xl font-black text-white">{value}</h3>
+                </div>
+                <div className={`p-3 rounded-xl bg-white/5 ${colorStyles[color].split(' ')[2]}`}>
+                    <Icon size={24} />
+                </div>
+            </div>
+        </div>
+    );
+};
+
+const NavButton = ({ active, onClick, icon: Icon, label, badge, isNew }: any) => (
+    <button 
+        onClick={onClick}
+        className={`
+            w-full flex items-center justify-between p-3.5 rounded-xl transition-all duration-200 group
+            ${active 
+                ? 'bg-gradient-to-r from-primary/20 to-transparent text-primary border-r-2 border-primary' 
+                : 'text-gray-400 hover:bg-white/5 hover:text-gray-200 border-r-2 border-transparent'}
+        `}
+    >
+        <div className="flex items-center gap-3">
+            <Icon size={20} className={active ? 'animate-pulse' : ''} />
+            <span className="font-medium text-sm">{label}</span>
+        </div>
+        {badge !== undefined && (
+            <span className="bg-white/10 text-xs px-2 py-0.5 rounded-md">{badge}</span>
+        )}
+        {isNew && (
+            <span className="bg-indigo-500 text-[10px] font-bold text-white px-1.5 py-0.5 rounded animate-pulse">جدید</span>
+        )}
+    </button>
+);
+
+export default AdminDashboard;
+-------------------------
+.\components\AuthScreen.tsx:
+import React, { useState } from 'react';
+import { User as UserIcon, Lock, Phone, UserPlus, LogIn, ChevronRight, ShieldCheck } from 'lucide-react';
+import { authService } from '../services/authService';
+import { adminService } from '../services/adminService';
+import { User } from '../types';
+
+interface Props {
+  onAuthSuccess: (user: User) => void;
+  onAdminLogin: () => void;
+}
+
+const AuthScreen: React.FC<Props> = ({ onAuthSuccess, onAdminLogin }) => {
+  const [isLogin, setIsLogin] = useState(true);
+  const [isAdminMode, setIsAdminMode] = useState(false); // New State for Admin View
+  const [isLoading, setIsLoading] = useState(false);
+  const [error, setError] = useState('');
+
+  // Login State
+  const [loginId, setLoginId] = useState('');
+  const [loginPass, setLoginPass] = useState('');
+
+  // Signup State
+  const [signupData, setSignupData] = useState({
+    name: '',
+    last_name: '',
+    username: '',
+    number: '',
+    pass: ''
+  });
+
+  const handleLogin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError('');
+    setIsLoading(true);
+    
+    // ADMIN LOGIC
+    if (isAdminMode) {
+        const res = await adminService.login(loginId, loginPass);
+        if (res.success) {
+            onAdminLogin();
+        } else {
+            setError('نام کاربری یا رمز عبور ادمین اشتباه است.');
+        }
+        setIsLoading(false);
+        return;
+    }
+
+    // USER LOGIC
+    const result = await authService.login(loginId, loginPass);
+    if (result.success && result.user) {
+      onAuthSuccess(result.user);
+    } else {
+      setError(result.error || 'خطا در ورود');
+    }
+    setIsLoading(false);
+  };
+
+  const handleSignup = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError('');
+    
+    if (!signupData.number || !signupData.username || !signupData.pass) {
+        setError("لطفا فیلدهای اجباری را پر کنید");
+        return;
+    }
+
+    setIsLoading(true);
+    const result = await authService.signup(signupData);
+    if (result.success && result.user) {
+      onAuthSuccess(result.user);
+    } else {
+      setError(result.error || 'خطا در ثبت نام');
+    }
+    setIsLoading(false);
+  };
+
+  return (
+    <div className="min-h-screen bg-black flex flex-col items-center justify-center p-4 relative overflow-hidden">
+      {/* Background Elements */}
+      <div className="absolute top-[-10%] left-[-10%] w-[40%] h-[40%] bg-primary/20 rounded-full blur-[120px] pointer-events-none"></div>
+      <div className="absolute bottom-[-10%] right-[-10%] w-[30%] h-[30%] bg-blue-500/10 rounded-full blur-[100px] pointer-events-none"></div>
+
+      <div className="w-full max-w-md bg-[#121212] border border-white/10 rounded-3xl shadow-2xl overflow-hidden relative z-10 transition-all duration-500">
+        
+        {/* Header Toggle (Hidden in Admin Mode) */}
+        {!isAdminMode && (
+            <div className="flex p-2 bg-[#1E1E1E]">
+            <button 
+                onClick={() => { setIsLogin(true); setError(''); }}
+                className={`flex-1 py-3 rounded-xl font-bold text-sm transition-all duration-300 ${isLogin ? 'bg-primary text-black shadow-lg shadow-primary/20' : 'text-gray-500 hover:text-gray-300'}`}
+            >
+                ورود به حساب
+            </button>
+            <button 
+                onClick={() => { setIsLogin(false); setError(''); }}
+                className={`flex-1 py-3 rounded-xl font-bold text-sm transition-all duration-300 ${!isLogin ? 'bg-white text-black shadow-lg' : 'text-gray-500 hover:text-gray-300'}`}
+            >
+                ثبت نام رایگان
+            </button>
+            </div>
+        )}
+
+        {/* Admin Header */}
+        {isAdminMode && (
+            <div className="p-4 bg-red-900/20 border-b border-red-500/30 flex items-center gap-3">
+                <button onClick={() => { setIsAdminMode(false); setError(''); setLoginId(''); setLoginPass(''); }} className="text-gray-400 hover:text-white">
+                    <ChevronRight className="rotate-180" />
+                </button>
+                <h3 className="text-red-500 font-bold flex items-center gap-2">
+                    <ShieldCheck size={20} />
+                    ورود به پنل مدیریت
+                </h3>
+            </div>
+        )}
+
+        <div className="p-8">
+           <div className="text-center mb-8">
+             <h2 className="text-2xl font-black text-white mb-2">
+               {isAdminMode ? 'خوش آمدید، مدیر' : (isLogin ? 'خوش آمدید! 👋' : 'ساخت حساب کاربری 🚀')}
+             </h2>
+             <p className="text-gray-400 text-sm">
+               {isAdminMode ? 'برای دسترسی به داشبورد وارد شوید' : (isLogin ? 'برای استفاده از دستیار هوشمند وارد شوید' : 'به خانواده استار سیکلت بپیوندید')}
+             </p>
+           </div>
+
+           {error && (
+             <div className="mb-6 p-3 bg-red-500/10 border border-red-500/30 rounded-xl text-red-400 text-xs text-center animate-fadeIn">
+               {error}
+             </div>
+           )}
+
+           {(isLogin || isAdminMode) ? (
+             // Login / Admin Form
+             <form onSubmit={handleLogin} className="space-y-4">
+                <div className="space-y-1">
+                    <label className="text-xs text-gray-400 mr-1">{isAdminMode ? 'نام کاربری ادمین' : 'نام کاربری یا شماره موبایل'}</label>
+                    <div className="relative">
+                        <UserIcon size={18} className="absolute right-3 top-3.5 text-gray-500" />
+                        <input 
+                          type="text" 
+                          value={loginId}
+                          onChange={(e) => setLoginId(e.target.value)}
+                          className={`w-full bg-[#1E1E1E] border ${isAdminMode ? 'focus:border-red-500/50' : 'focus:border-primary/50'} border-white/10 text-white rounded-xl py-3 pr-10 pl-4 outline-none transition-all placeholder-gray-600`}
+                          placeholder={isAdminMode ? "Admin" : "مثلا: 0912..."}
+                        />
+                    </div>
+                </div>
+
+                <div className="space-y-1">
+                    <label className="text-xs text-gray-400 mr-1">رمز عبور</label>
+                    <div className="relative">
+                        <Lock size={18} className="absolute right-3 top-3.5 text-gray-500" />
+                        <input 
+                          type="password" 
+                          value={loginPass}
+                          onChange={(e) => setLoginPass(e.target.value)}
+                          className={`w-full bg-[#1E1E1E] border ${isAdminMode ? 'focus:border-red-500/50' : 'focus:border-primary/50'} border-white/10 text-white rounded-xl py-3 pr-10 pl-4 outline-none transition-all placeholder-gray-600`}
+                          placeholder="••••••••"
+                        />
+                    </div>
+                </div>
+
+                <button 
+                  type="submit" 
+                  disabled={isLoading}
+                  className={`w-full ${isAdminMode ? 'bg-red-600 hover:bg-red-500 shadow-red-500/20' : 'bg-primary hover:bg-green-400 shadow-primary/20'} text-white font-bold py-3.5 rounded-xl transition-all shadow-lg flex items-center justify-center gap-2 mt-4`}
+                >
+                  {isLoading ? 'در حال بررسی...' : (
+                    <>
+                      <span>{isAdminMode ? 'ورود به پنل' : 'ورود به سیستم'}</span>
+                      <LogIn size={18} />
+                    </>
+                  )}
+                </button>
+             </form>
+           ) : (
+             // Signup Form
+             <form onSubmit={handleSignup} className="space-y-3">
+                <div className="grid grid-cols-2 gap-3">
+                   <input 
+                     type="text" 
+                     value={signupData.name}
+                     onChange={(e) => setSignupData({...signupData, name: e.target.value})}
+                     className="bg-[#1E1E1E] border border-white/10 focus:border-white/30 text-white rounded-xl py-3 px-4 outline-none transition-all placeholder-gray-600 text-sm"
+                     placeholder="نام"
+                   />
+                   <input 
+                     type="text" 
+                     value={signupData.last_name}
+                     onChange={(e) => setSignupData({...signupData, last_name: e.target.value})}
+                     className="bg-[#1E1E1E] border border-white/10 focus:border-white/30 text-white rounded-xl py-3 px-4 outline-none transition-all placeholder-gray-600 text-sm"
+                     placeholder="نام خانوادگی"
+                   />
+                </div>
+
+                <div className="relative">
+                    <UserIcon size={18} className="absolute right-3 top-3.5 text-gray-500" />
+                    <input 
+                      type="text"
+                      value={signupData.username}
+                      onChange={(e) => setSignupData({...signupData, username: e.target.value})} 
+                      className="w-full bg-[#1E1E1E] border border-white/10 focus:border-primary/50 text-white rounded-xl py-3 pr-10 pl-4 outline-none transition-all placeholder-gray-600 text-sm"
+                      placeholder="نام کاربری (انگلیسی)"
+                      dir="ltr"
+                    />
+                </div>
+
+                <div className="relative">
+                    <Phone size={18} className="absolute right-3 top-3.5 text-gray-500" />
+                    <input 
+                      type="tel"
+                      value={signupData.number}
+                      onChange={(e) => setSignupData({...signupData, number: e.target.value})} 
+                      className="w-full bg-[#1E1E1E] border border-white/10 focus:border-primary/50 text-white rounded-xl py-3 pr-10 pl-4 outline-none transition-all placeholder-gray-600 text-sm"
+                      placeholder="شماره موبایل"
+                      dir="ltr"
+                    />
+                </div>
+
+                <div className="relative">
+                    <Lock size={18} className="absolute right-3 top-3.5 text-gray-500" />
+                    <input 
+                      type="password"
+                      value={signupData.pass}
+                      onChange={(e) => setSignupData({...signupData, pass: e.target.value})} 
+                      className="w-full bg-[#1E1E1E] border border-white/10 focus:border-primary/50 text-white rounded-xl py-3 pr-10 pl-4 outline-none transition-all placeholder-gray-600 text-sm"
+                      placeholder="رمز عبور"
+                      dir="ltr"
+                    />
+                </div>
+
+                <button 
+                  type="submit"
+                  disabled={isLoading} 
+                  className="w-full bg-white hover:bg-gray-200 text-black font-bold py-3.5 rounded-xl transition-all shadow-lg flex items-center justify-center gap-2 mt-2"
+                >
+                  {isLoading ? 'در حال ثبت...' : (
+                    <>
+                      <span>ثبت نام و ورود</span>
+                      <UserPlus size={18} />
+                    </>
+                  )}
+                </button>
+             </form>
+           )}
+        </div>
+      </div>
+      
+      {/* Admin Login Trigger - Positioned far below */}
+      {!isAdminMode && (
+          <div className="absolute bottom-6 right-6 opacity-30 hover:opacity-100 transition-opacity">
+            <button 
+                onClick={() => { setIsAdminMode(true); setError(''); setLoginId(''); setLoginPass(''); }}
+                className="text-xs text-white flex items-center gap-2 px-3 py-2 rounded-lg hover:bg-white/10"
+            >
+                <ShieldCheck size={14} />
+                ورود ادمین
+            </button>
+          </div>
+      )}
+    </div>
+  );
+};
+
+export default AuthScreen;
+-------------------------
+.\components\ChatMessage.tsx:
 import React, { useState, useEffect, memo } from 'react';
 import { ChatMessage as ChatMessageType, ProductMatch } from '../types';
 import ProductCard from './ProductCard';
@@ -2001,10 +2888,8 @@ const ChatMessage: React.FC<Props> = ({ message, isLastMessage, onCompare, compa
 };
 
 export default memo(ChatMessage);
-
 -------------------------
 .\components\ComparisonModal.tsx:
-
 import React from 'react';
 import { ProductMatch } from '../types';
 import { X, ExternalLink } from 'lucide-react';
@@ -2103,10 +2988,8 @@ const ComparisonModal: React.FC<Props> = ({ products, onClose }) => {
 };
 
 export default ComparisonModal;
-
 -------------------------
 .\components\ProductCard.tsx:
-
 import React from 'react';
 import { ProductMatch } from '../types';
 import { ShoppingCart, ExternalLink, Sparkles, Scale } from 'lucide-react';
@@ -2231,10 +3114,8 @@ const ProductCard: React.FC<Props> = ({ product, index, onCompare, isSelectedFor
 };
 
 export default ProductCard;
-
 -------------------------
 .\components\Typewriter.tsx:
-
 import React, { useState, useEffect, useRef } from 'react';
 import ReactMarkdown from 'react-markdown';
 
@@ -2292,10 +3173,332 @@ const Typewriter: React.FC<Props> = ({ text, onComplete, speed = 10 }) => {
 };
 
 export default Typewriter;
+-------------------------
+.\services\adminService.ts:
+import { supabase } from './supabaseClient';
+import { generateSimpleContent } from './geminiService';
 
+export const adminService = {
+  // Admin Login
+  async login(username: string, pass: string) {
+    try {
+      const { data, error } = await supabase
+        .from('admins')
+        .select('*')
+        .eq('username', username)
+        .eq('pass', pass)
+        .maybeSingle();
+
+      if (error) {
+        if (error.code === 'PGRST205') {
+            console.error("CRITICAL ERROR: Table 'admins' not found. Please run SQL.");
+        }
+        throw error;
+      }
+      return { success: !!data, admin: data };
+    } catch (error) {
+      console.error('Admin login error:', error);
+      return { success: false, error };
+    }
+  },
+
+  // Get Dashboard Statistics
+  async getStats() {
+    try {
+      const { count: usersCount } = await supabase.from('users').select('*', { count: 'exact', head: true });
+      const { data: sessions } = await supabase.from('chat_sessions').select('messages, last_modified');
+
+      let totalMessages = 0;
+      let messagesToday = 0;
+      const now = new Date();
+      const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+
+      sessions?.forEach((session: any) => {
+        const msgs = session.messages || [];
+        totalMessages += msgs.length;
+        msgs.forEach((m: any) => {
+            if (m.timestamp && m.timestamp >= startOfDay) messagesToday++;
+        });
+      });
+
+      return {
+        usersCount: usersCount || 0,
+        sessionsCount: sessions?.length || 0,
+        totalMessages,
+        messagesToday
+      };
+    } catch (error) {
+      console.error('Stats error:', error);
+      return { usersCount: 0, sessionsCount: 0, totalMessages: 0, messagesToday: 0 };
+    }
+  },
+
+  // Get Users (Robust handling)
+  async getUsers() {
+    // Select all columns
+    const { data, error } = await supabase.from('users').select('*');
+    
+    if (error) {
+        console.error("Error fetching users:", error);
+        return [];
+    }
+
+    // Sort manually in JS to avoid column name issues in SQL sorting if schemas differ
+    return (data || []).sort((a, b) => {
+        const dateA = new Date(a.signup_date || a.signup_Date || 0).getTime();
+        const dateB = new Date(b.signup_date || b.signup_Date || 0).getTime();
+        return dateB - dateA;
+    });
+  },
+
+  // Delete User
+  async deleteUser(userId: string) {
+    try {
+        const { error } = await supabase.from('users').delete().eq('user_id', userId);
+        if (error) throw error;
+        return { success: true };
+    } catch (error) {
+        console.error("Delete user error:", error);
+        return { success: false, error };
+    }
+  },
+
+  // Get Sessions
+  async getSessions() {
+    const { data } = await supabase.from('chat_sessions').select('*').order('last_modified', { ascending: false });
+    return data || [];
+  },
+
+  // AI Business Report
+  async generateBusinessReport() {
+    try {
+        // Fetch last 50 user messages across all sessions
+        const { data: sessions } = await supabase
+            .from('chat_sessions')
+            .select('messages')
+            .order('last_modified', { ascending: false })
+            .limit(20);
+
+        let allUserTexts = "";
+        sessions?.forEach((s: any) => {
+            const userMsgs = (s.messages || [])
+                .filter((m: any) => m.role === 'user')
+                .map((m: any) => m.text)
+                .join(" | ");
+            allUserTexts += userMsgs + "\n";
+        });
+
+        if (!allUserTexts) return "داده‌ای برای تحلیل وجود ندارد.";
+
+        const prompt = `
+        تو یک تحلیلگر ارشد کسب و کار برای فروشگاه لوازم موتور "استار سیکلت" هستی.
+        در زیر لیستی از پیام های اخیر کاربران آمده است.
+        لطفا یک گزارش مدیریتی کوتاه و جذاب (به فارسی) تولید کن که شامل موارد زیر باشد:
+        1. 📈 **ترندهای بازار:** کاربران بیشتر دنبال چه قطعاتی هستند؟ (کلاه، اگزوز، روغن...)
+        2. 💰 **حساسیت قیمتی:** آیا دنبال جنس ارزان هستند یا لوکس؟
+        3. 💡 **پیشنهاد برای تامین کالا:** چه چیزی در انبار شارژ کنیم بهتر فروش میرود؟
+        
+        لیست پیام ها:
+        ${allUserTexts}
+        `;
+
+        return await generateSimpleContent(prompt);
+    } catch (error) {
+        return "خطا در تولید گزارش هوشمند.";
+    }
+  }
+};
+-------------------------
+.\services\authService.ts:
+import { supabase } from './supabaseClient';
+import { User } from '../types';
+
+const SESSION_KEY = 'mobinext_user_session';
+const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
+
+interface AuthResult {
+  success: boolean;
+  user?: User;
+  error?: string;
+}
+
+const mapUser = (data: any): User => ({
+    user_id: data.user_id,
+    number: data.number,
+    username: data.username,
+    name: data.name,
+    last_name: data.last_name,
+    signup_Date: data.signup_date || data.signup_Date || new Date().toISOString()
+});
+
+export const authService = {
+  // Sign Up
+  async signup(data: { number: string; username: string; name: string; last_name: string; pass: string }): Promise<AuthResult> {
+    try {
+      // Check for existing user using maybeSingle to avoid 0-row errors
+      const { data: existingUser, error: checkError } = await supabase
+        .from('users')
+        .select('user_id')
+        .or(`number.eq.${data.number},username.eq.${data.username}`)
+        .maybeSingle();
+
+      if (checkError) {
+         // If it's a connection error or something serious, throw it
+         throw checkError;
+      }
+
+      if (existingUser) {
+        return { success: false, error: 'این شماره موبایل یا نام کاربری قبلا ثبت شده است.' };
+      }
+
+      const { data: newUserRaw, error } = await supabase
+        .from('users')
+        .insert([{
+            number: data.number,
+            username: data.username,
+            name: data.name,
+            last_name: data.last_name,
+            pass: data.pass
+        }])
+        .select()
+        .single();
+
+      if (error) throw error;
+      
+      const newUser = mapUser(newUserRaw);
+      this.saveLocalSession(newUser);
+      return { success: true, user: newUser };
+
+    } catch (error: any) {
+      console.error('Signup error:', error);
+      const msg = error?.message || error?.details || 'خطا در ثبت نام';
+      return { success: false, error: typeof msg === 'string' ? msg : JSON.stringify(msg) };
+    }
+  },
+
+  // Login
+  async login(identifier: string, pass: string): Promise<AuthResult> {
+    try {
+      // Check if identifier is number or username
+      const { data: userRaw, error } = await supabase
+        .from('users')
+        .select('*')
+        .or(`number.eq.${identifier},username.eq.${identifier}`)
+        .eq('pass', pass)
+        .maybeSingle();
+
+      if (error) throw error;
+
+      if (!userRaw) {
+        return { success: false, error: 'نام کاربری/شماره یا رمز عبور اشتباه است.' };
+      }
+      
+      const user = mapUser(userRaw);
+      this.saveLocalSession(user);
+      return { success: true, user };
+
+    } catch (error: any) {
+      console.error('Login error:', error);
+      const msg = error?.message || 'خطا در برقراری ارتباط با سرور';
+      return { success: false, error: msg };
+    }
+  },
+
+  // Local Storage Management (7 Days Rule)
+  saveLocalSession(user: User) {
+    const sessionData = {
+      user,
+      expiry: Date.now() + SEVEN_DAYS_MS
+    };
+    localStorage.setItem(SESSION_KEY, JSON.stringify(sessionData));
+  },
+
+  checkLocalSession(): User | null {
+    const sessionStr = localStorage.getItem(SESSION_KEY);
+    if (!sessionStr) return null;
+
+    try {
+      const session = JSON.parse(sessionStr);
+      if (Date.now() > session.expiry) {
+        localStorage.removeItem(SESSION_KEY);
+        return null;
+      }
+      return session.user;
+    } catch {
+      return null;
+    }
+  },
+
+  logout() {
+    localStorage.removeItem(SESSION_KEY);
+  }
+};
+-------------------------
+.\services\chatPersistence.ts:
+import { supabase } from './supabaseClient';
+import { Session, ChatMessage } from '../types';
+
+export const chatPersistence = {
+  // Load all sessions for a user
+  async loadUserSessions(userId: string): Promise<Session[]> {
+    try {
+      const { data, error } = await supabase
+        .from('chat_sessions')
+        .select('*')
+        .eq('user_id', userId)
+        .order('last_modified', { ascending: false });
+
+      if (error) {
+        console.error('Error loading sessions:', error);
+        return [];
+      }
+
+      return data.map((item: any) => ({
+        id: item.id,
+        title: item.title,
+        messages: item.messages,
+        lastModified: new Date(item.last_modified).getTime()
+      }));
+
+    } catch (e) {
+      console.error(e);
+      return [];
+    }
+  },
+
+  // Save or Update a session
+  async saveSession(userId: string, session: Session) {
+    try {
+      const { error } = await supabase
+        .from('chat_sessions')
+        .upsert({
+          id: session.id,
+          user_id: userId,
+          title: session.title,
+          messages: session.messages,
+          last_modified: new Date(session.lastModified).toISOString()
+        }, { onConflict: 'id' });
+
+      if (error) console.error('Error saving session:', error);
+    } catch (e) {
+      console.error(e);
+    }
+  },
+
+  // Delete a session
+  async deleteSession(sessionId: string) {
+    try {
+      await supabase
+        .from('chat_sessions')
+        .delete()
+        .eq('id', sessionId);
+    } catch (e) {
+      console.error(e);
+    }
+  }
+};
 -------------------------
 .\services\geminiService.ts:
-
 import { GoogleGenAI, FunctionDeclaration, Type, Content } from "@google/genai";
 import { searchProducts } from "./productService";
 import { FilterParams, ChatMessage } from "../types";
@@ -2330,7 +3533,7 @@ const BASE_PROMPT = `
 
 ⛔ **نبایدهای مطلق:**
 - هرگز قبل از دانستن "بودجه" و "نوع محصول" جستجو نکنید (مگر اینکه کاربر بگوید "همه مدل ها را نشان بده").
-- فیلترینگ شما هرگز نباید بر اساس متن توضیحات (Description) باشد. فقط عنوان، ویژگی‌ها، سایز، حجم و قیمت ملاک است.
+- فیلترینگ شما هرگز نباید بر اساس متن توضیحات (Description) یاشد. فقط عنوان، ویژگی‌ها، سایز، حجم و قیمت ملاک است.
 `;
 
 const RAG_SYSTEM_PROMPT = `
@@ -2396,6 +3599,24 @@ const mapHistoryToContent = (messages: ChatMessage[]): Content[] => {
 
 export const initializeChat = () => {
     getClient();
+};
+
+// New function for Admin Analysis
+export const generateSimpleContent = async (prompt: string): Promise<string> => {
+    const client = getClient();
+    try {
+        const response = await client.models.generateContent({
+            model: "gemini-2.5-flash",
+            contents: prompt,
+            config: {
+                temperature: 0.5,
+            }
+        });
+        return response.text || "خطا در تولید محتوا";
+    } catch (error) {
+        console.error("AI Gen Error:", error);
+        return "خطا در ارتباط با هوش مصنوعی";
+    }
 };
 
 export const sendMessageToGemini = async (newMessage: string, history: ChatMessage[]) => {
@@ -2465,10 +3686,8 @@ export const sendMessageToGemini = async (newMessage: string, history: ChatMessa
     };
   }
 };
-
 -------------------------
 .\services\productService.ts:
-
 import { Product, ProductMatch, FilterParams, DATA_URL } from '../types';
 
 let productDatabase: Product[] = [];
@@ -2611,5 +3830,12 @@ export const searchProducts = async (params: FilterParams): Promise<ProductMatch
   // Cap at 10 items
   return finalResults.slice(0, 10);
 };
+-------------------------
+.\services\supabaseClient.ts:
+import { createClient } from '@supabase/supabase-js';
 
+const supabaseUrl = "https://jhjlxljhijhrvclgsbzc.supabase.co";
+const supabaseKey = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Impoamx4bGpoaWpocnZjbGdzYnpjIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjUyNjQ4NzYsImV4cCI6MjA4MDg0MDg3Nn0.8WwtsrOE3Fch_vFczeu6Fz9A2QiO_Pbwh_MxuhFUFwY";
+
+export const supabase = createClient(supabaseUrl, supabaseKey);
 -------------------------
