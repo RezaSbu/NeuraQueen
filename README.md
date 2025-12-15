@@ -222,12 +222,22 @@ npm start
 
 This project is proprietary and developed exclusively for StarCycle by Mobinext.
 
-## 📞 Support
 
-For technical support or questions:
-- **Development Team**: Mobinext
+## 📞 Support & Contact
+
+For technical support or inquiries, please contact:
+
+- **Development Team**: Mobinext  
 - **Client**: StarCycle Motorcycle Parts Store
 
 ---
 
-**Built with ❤️ by Mobinext for StarCycle**
+## 🛠️ Project Information
+
+This project was developed and maintained by **Mobinext** for **StarCycle**, focusing on performance, scalability, and clean architecture.
+
+---
+
+## ❤️ Credits
+
+**Built with care by Mobinext for StarCycle**
